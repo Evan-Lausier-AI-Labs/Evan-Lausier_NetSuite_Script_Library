@@ -1,5 +1,5 @@
 # Evan-Lausier_NetSuite_Script_Library
-A comprehensive library of NetSuite SuiteScript solutions covering transactions, integrations, validations, and automation.
+Evan Lausier has created a comprehensive library of NetSuite SuiteScript solutions covering transactions, integrations, validations, and automation.
 
 ## Structure
 Each script is organized in its own folder with a README describing its purpose and usage.
