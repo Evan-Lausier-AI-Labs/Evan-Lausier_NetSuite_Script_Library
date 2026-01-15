@@ -28,6 +28,7 @@ Each script is organized in its own folder with a README describing its purpose 
 | [SFTP_Transfer](./SFTP_Transfer) | Scheduled | 2.x | SFTP file uploads and downloads |
 | [SFTP_Upload_Suitelet](./SFTP_Upload_Suitelet) | Suitelet | 1.0 | Secure file transfer uploads via SFTP with folder selection |
 | [SKU_Generator](./SKU_Generator) | User Event | 2.0 | Auto-generate SKU numbers for items |
+| [SuiteQL_Query_Tool](./SuiteQL_Query_Tool) | Suitelet | 2.x | Interactive SuiteQL query execution with results export and query management |
 | [Split_Line_Integration](./Split_Line_Integration) | Integration | 2.x | Split fulfillment line items for Enlinx/Celigo integration |
 | [Update_SO_3PL_Line](./Update_SO_3PL_Line) | User Event | 2.x | Update Sales Order lines with 3PL response status |
 | [Workflow_Trigger_Suitelet](./Workflow_Trigger_Suitelet) | Suitelet | 1.0 | Trigger workflow actions on Journal entries |
