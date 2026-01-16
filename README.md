@@ -13,6 +13,7 @@ Each script is organized in its own folder with a README describing its purpose 
 | [Auto_Email_Invoice](./Auto_Email_Invoice) | Map/Reduce | 2.x | Email invoices with PDF attachments |
 | [Batch_Field_Update](./Batch_Field_Update) | Scheduled | 1.0 | Batch update field values on multiple records with governance management |
 | [Consolidation_Script](./Consolidation_Script) | User Event | 2.x | Consolidate Sales Order lines by location, time slot, and Prop 65 |
+| [Create_Adv_ICJE](./Create_Adv_ICJE) | User Event + Map/Reduce | 2.1 | Auto-create Advanced Intercompany Journal Entries from Vendor Bill expense lines |
 | [External_ID_Update](./External_ID_Update) | User Event | 2.0 | Update Employee External ID based on custom email field |
 | [Field_Protect](./Field_Protect) | Client | 1.0 | Role-based field protection on transactions |
 | [Forced_Error](./Forced_Error) | User Event | 2.x | Force errors for integration flow testing |
