@@ -19,6 +19,7 @@ Each script is organized in its own folder with a README describing its purpose 
 | [Forced_Error](./Forced_Error) | User Event | 2.x | Force errors for integration flow testing |
 | [HTTPS_Multipart_Upload](./HTTPS_Multipart_Upload) | Module | 2.x | Multipart/form-data file uploads via HTTPS |
 | [Invoice_Grouping](./Invoice_Grouping) | User Event | 2.x | Group invoice lines by project for printing |
+| [Invoice_Line_Deletion](./Invoice_Line_Deletion) | Map/Reduce | 2.1 | Bulk removal of duplicate or unwanted lines from invoices with dry run support |
 | [JE_CSV_Validation](./JE_CSV_Validation) | User Event | 1.0 | Validate Journal Entry lines during CSV import |
 | [JE_Line_Validation](./JE_Line_Validation) | Client | 1.0 | Real-time JE line validation based on account classification |
 | [PO_Item_Image](./PO_Item_Image) | User Event | 1.0 | Populate item thumbnail images on Purchase Order lines |
