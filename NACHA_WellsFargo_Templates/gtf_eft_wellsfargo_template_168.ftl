@@ -2,9 +2,13 @@
 <#-- Wells Fargo PPD+ EFT Credits (EFT returns / credit payments) -->
 <#-- Owner: Thomas Kleynhans | Account: GTF Production 9100765 -->
 <#-- Last updated: 2026-03-18 -->
-<#-- BUGFIX 2026-03-18: OrgnrDepAcctID BankID corrected from acct_num to bank_num -->
+<#-- BUGFIX 2026-03-18 (fix 1): OrgnrDepAcctID BankID corrected from acct_num to bank_num -->
 <#--   acct_num (account number) was incorrectly placed in the ABA routing number field -->
 <#--   causing Wells Fargo to reject files: 'Originating Bank ID exceeds maximum length' -->
+<#-- BUGFIX 2026-03-18 (fix 2): Party name wrapper element corrected from <n> to <Name> -->
+<#--   <n><Name1> is not a recognized WF XML element; WF parser could not locate party names -->
+<#--   causing rejection: 'Originating/Receiving Party Name Information; Field is absent' -->
+<#--   Corrected to <Name><Name1> per confirmed Wells Fargo sandbox template -->
 
 <#-- format specific processing -->
 
@@ -90,7 +94,7 @@
 <IDInfo IDType="CustomerID"><ID>${cbank.custpage_eft_custrecord_2663_bank_comp_id}</ID></IDInfo>
 <Message MsgType="ACH"><MsgText>Payment Detail</MsgText></Message>
 <OrgnrParty>
-<n><Name1>${setMaxLength(cbank.custrecord_2663_legal_name, 60)}</Name1></n>
+<Name><Name1>${setMaxLength(cbank.custrecord_2663_legal_name, 60)}</Name1></Name>
 <PostAddr>
 <Addr1></Addr1>
 <City></City>
@@ -100,7 +104,7 @@
 </PostAddr>
 </OrgnrParty>
 <RcvrParty>
-<n><Name1>${setMaxLength(buildEntityName(entity,false), 60)}</Name1></n>
+<Name><Name1>${setMaxLength(buildEntityName(entity,false), 60)}</Name1></Name>
 <RefInfo RefType="VN"><RefID>${entity.internalid}</RefID></RefInfo>
 <PostAddr>
 <Addr1>5620 Glenridge Dr</Addr1>
