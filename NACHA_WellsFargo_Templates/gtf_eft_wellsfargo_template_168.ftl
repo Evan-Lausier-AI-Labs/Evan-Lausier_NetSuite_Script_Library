@@ -5,7 +5,7 @@
 <#-- BUGFIX 2026-03-18 (fix 1): OrgnrDepAcctID BankID corrected from acct_num to bank_num -->
 <#--   acct_num (account number) was incorrectly placed in the ABA routing number field -->
 <#--   causing Wells Fargo to reject files: 'Originating Bank ID exceeds maximum length' -->
-<#-- BUGFIX 2026-03-18 (fix 2): Party name wrapper element corrected from <n> to <Name> -->
+<#-- BUGFIX 2026-03-18 (fix 2): Party name wrapper corrected from <n> to <Name> -->
 <#--   <n><Name1> is not a recognized WF XML element; WF parser could not locate party names -->
 <#--   causing rejection: 'Originating/Receiving Party Name Information; Field is absent' -->
 <#--   Corrected to <Name><Name1> per confirmed Wells Fargo sandbox template -->
