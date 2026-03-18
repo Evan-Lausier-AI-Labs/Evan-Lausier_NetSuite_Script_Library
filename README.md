@@ -22,6 +22,8 @@ Each script is organized in its own folder with a README describing its purpose 
 | [Invoice_Line_Deletion](./Invoice_Line_Deletion) | Map/Reduce | 2.1 | Bulk removal of duplicate or unwanted lines from invoices with dry run support |
 | [JE_CSV_Validation](./JE_CSV_Validation) | User Event | 1.0 | Validate Journal Entry lines during CSV import |
 | [JE_Line_Validation](./JE_Line_Validation) | Client | 1.0 | Real-time JE line validation based on account classification |
+| [NACHA_Regions_Templates](./NACHA_Regions_Templates) | FreeMarker | 1.x | Payment Manager FreeMarker templates for Regions Bank ACH (templates 170/171) |
+| [NACHA_WellsFargo_Templates](./NACHA_WellsFargo_Templates) | FreeMarker | 1.x | Payment Manager FreeMarker templates for Wells Fargo ACH DD and EFT (templates 167/168) |
 | [PO_Item_Image](./PO_Item_Image) | User Event | 1.0 | Populate item thumbnail images on Purchase Order lines |
 | [Royalty_Invoice_Script](./Royalty_Invoice_Script) | Map/Reduce | 2.1 | Create franchise royalty invoices from sales data |
 | [Royalty_Invoice_Suitelet](./Royalty_Invoice_Suitelet) | Suitelet | 2.1 | UI for selecting and creating royalty invoices |
