@@ -8,7 +8,7 @@
 <#-- BUGFIX 2026-03-18 (fix 2): Party name wrapper corrected from <n> to <Name> -->
 <#--   <n><Name1> is not a recognized WF XML element; WF parser could not locate party names -->
 <#--   causing rejection: 'Originating/Receiving Party Name Information; Field is absent' -->
-<#--   Corrected to <Name><Name1> per confirmed Wells Fargo sandbox template -->
+<#--   Corrected to <Name><Name1> per confirmed Wells Fargo sandbox template (batch 56) -->
 
 <#-- format specific processing -->
 
