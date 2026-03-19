@@ -6,6 +6,14 @@
 * as NULL instead of extracting first character 'N', which caused trial balance JE lines
 * with no department to split across two rows ('N' and blank) rather than consolidating
 * under a single NULL department group.
+*
+* Fix (2026-03-19): Added 'DeferRevenue' to balance sheet accttype list in OpeningBalance
+* (x2) and YTDAmount (x1) CASE expressions. Without this, all 20 Deferred Revenue accounts
+* (~$63.4M total balance) were incorrectly treated as income statement accounts, returning
+* YTD-only activity instead of cumulative ending balances. Account 2055 example: was
+* returning -$106,659.90 (2025 YTD only) instead of correct $220,521.30 (cumulative).
+* Confirmed via full accttype audit: DeferRevenue is the only BS type missing from the list.
+* Income, Expense, OthExpense, and COGS are correctly absent (IS accounts).
 */
 
 define(['N/query', 'N/file', 'N/runtime', 'N/log'], (query, file, runtime, log) => {
@@ -166,10 +174,10 @@ define(['N/query', 'N/file', 'N/runtime', 'N/log'], (query, file, runtime, log) 
         /* Opening Balance */
         SUM(
           CASE 
-            WHEN acc.accttype IN ('Bank','AcctRec','OthCurrAsset','FixedAsset','OthAsset','AcctPay','CreditCard','OthCurrLiab','LongTermLiab','Equity')
+            WHEN acc.accttype IN ('Bank','AcctRec','OthCurrAsset','FixedAsset','OthAsset','AcctPay','CreditCard','OthCurrLiab','LongTermLiab','Equity','DeferRevenue')
               AND ap.periodName <> ?
             THEN NVL(tal.debit, 0) - NVL(tal.credit, 0)
-            WHEN acc.accttype NOT IN ('Bank','AcctRec','OthCurrAsset','FixedAsset','OthAsset','AcctPay','CreditCard','OthCurrLiab','LongTermLiab','Equity')
+            WHEN acc.accttype NOT IN ('Bank','AcctRec','OthCurrAsset','FixedAsset','OthAsset','AcctPay','CreditCard','OthCurrLiab','LongTermLiab','Equity','DeferRevenue')
               AND ap.periodName <> ?
               AND SUBSTR(ap.periodname, INSTR(ap.periodname, ' ') + 1) = SUBSTR(?, INSTR(?, ' ') + 1)
             THEN NVL(tal.debit, 0) - NVL(tal.credit, 0)
@@ -180,7 +188,7 @@ define(['N/query', 'N/file', 'N/runtime', 'N/log'], (query, file, runtime, log) 
         /* YTD Amount */
         SUM(
           CASE 
-            WHEN acc.accttype IN ('Bank','AcctRec','OthCurrAsset','FixedAsset','OthAsset','AcctPay','CreditCard','OthCurrLiab','LongTermLiab','Equity')
+            WHEN acc.accttype IN ('Bank','AcctRec','OthCurrAsset','FixedAsset','OthAsset','AcctPay','CreditCard','OthCurrLiab','LongTermLiab','Equity','DeferRevenue')
             THEN NVL(tal.debit, 0) - NVL(tal.credit, 0)
             WHEN SUBSTR(ap.periodname, INSTR(ap.periodname, ' ') + 1) = SUBSTR(?, INSTR(?, ' ') + 1)
             THEN NVL(tal.debit, 0) - NVL(tal.credit, 0)
