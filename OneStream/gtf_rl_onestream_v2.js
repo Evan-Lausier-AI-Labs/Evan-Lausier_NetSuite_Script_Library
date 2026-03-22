@@ -24,6 +24,12 @@
 * layer. Self-correcting: if year-end close is run in the future, the IS balances for
 * that year drop to zero and the synthetic rows contribute $0 automatically.
 * Missing amount confirmed: -$66.3M (FY2023) + -$56.2M (FY2024) = -$122,468,823.03.
+*
+* Fix (2026-03-22): Added 'OthIncome' to accttype IN list in
+* buildRetainedEarningsRollForwardSQL. The main query excludes OthIncome from the BS
+* cumulative bucket by omission, so the RE roll-forward must include it to stay in sync.
+* OthIncome is currently $0 at GTF (confirmed: prior gap ties to within $1 without it),
+* but must be present for correctness and to handle any future OthIncome postings.
 */
 
 define(['N/query', 'N/file', 'N/runtime', 'N/log'], (query, file, runtime, log) => {
@@ -286,23 +292,25 @@ define(['N/query', 'N/file', 'N/runtime', 'N/log'], (query, file, runtime, log) 
   /*
    * Secondary query: prior-year IS net income by subsidiary.
    *
-   * Sums Income/Expense/OthExpense/COGS for all fiscal years strictly before
-   * the requested period year. Results are injected as synthetic rows on
-   * account 350005 to mirror NetSuite's dynamic RE roll-forward.
+   * Sums all IS account types (Income, Expense, OthExpense, COGS, OthIncome)
+   * for all fiscal years strictly before the requested period year. Results are
+   * injected as synthetic rows on account 350005 to mirror NetSuite's dynamic
+   * RE roll-forward on Balance Sheet reports.
    *
-   * Self-correcting: once NetSuite year-end close (Manual Close) is run for
-   * a given year, closing JEs zero out the IS account balances for that year,
+   * Self-correcting: once NetSuite year-end close (Manual Close) is run for a
+   * given year, closing JEs zero out the IS account balances for that year,
    * causing this query to return 0 for it automatically -- no double-counting.
-   * NetSuite's recommended Automatic Close does NOT post physical JEs, so
-   * this synthetic fix remains necessary regardless of period close status.
+   * NetSuite's recommended Automatic Close does NOT post physical JEs, so this
+   * synthetic fix remains necessary regardless of period close status.
    *
-   * Two bound parameters required: periodName (x2) for year comparison.
+   * Two bound parameters required: both set to periodName, used for year
+   * comparison in WHERE clause.
    */
   const buildRetainedEarningsRollForwardSQL = () => `
       SELECT
-        sub.externalid                                          AS entity,
-        MAX(sub.name)                                          AS subname,
-        SUM(NVL(tal.debit, 0) - NVL(tal.credit, 0))          AS prior_year_ni
+        sub.externalid                                 AS entity,
+        MAX(sub.name)                                  AS subname,
+        SUM(NVL(tal.debit, 0) - NVL(tal.credit, 0))  AS prior_year_ni
       FROM transaction t
       JOIN transactionline tl
         ON t.id = tl.transaction
@@ -318,7 +326,7 @@ define(['N/query', 'N/file', 'N/runtime', 'N/log'], (query, file, runtime, log) 
       WHERE t.type IN ('CustInvc', 'Journal')
         AND t.posting = 'T'
         AND tal.accountingbook = 1
-        AND acc.accttype IN ('Income', 'Expense', 'OthExpense', 'COGS')
+        AND acc.accttype IN ('Income', 'Expense', 'OthExpense', 'COGS', 'OthIncome')
         AND ap.isinactive = 'F'
         AND ap.isquarter = 'F'
         AND ap.isyear = 'F'
@@ -340,48 +348,48 @@ define(['N/query', 'N/file', 'N/runtime', 'N/log'], (query, file, runtime, log) 
     const ni         = reRow['prior_year_ni'] || 0;
 
     return {
-      'entity'                                         : reRow['entity'],
-      'Entity Entity Description'                      : reRow['subname'],
-      'account'                                        : '350005',
-      'Account Account Description'                    : 'Equity | Operations : Retained Earnings / Deficit',
-      'Department/SBR'                                 : null,
-      'Department/SBR Department SBR Description'      : null,
-      'Funds'                                          : null,
-      'Period'                                         : periodNum,
-      'Category'                                       : null,
-      'Category Description'                           : null,
-      'Rebate Vendors'                                 : null,
-      'Rebate Vendor Description'                      : null,
-      'SBR COGS'                                       : 'None',
-      'SBR COGS Description'                           : 'None',
-      'SBR Sales'                                      : 'None',
-      'SBR Sales Description'                          : 'None',
-      'Professional Fees'                              : 'None',
-      'Professional Fee Description'                   : 'None',
-      'Marketing Campaigns'                            : 'None',
-      'Marketing Campaign Description'                 : 'None',
-      'Licensing Products'                             : null,
-      'Licensing Product Description'                  : null,
-      'Programs'                                       : 'None',
-      'Program Description'                            : 'None',
-      'Licensing Manufacturers'                        : null,
-      'Licensing Manufacturer Description'             : null,
-      'Licensing Retailers'                            : null,
-      'Licensing Retailer Description'                 : null,
-      'Manufacturing and Warehousing COGS'             : 'None',
-      'Manufacturing and Warehouse COGS Description'   : 'None',
-      'Manufacturing and Warehousing Sales'            : 'None',
-      'Manufacturing and Warehouse Sales Description'  : 'None',
-      'AR Process Levels'                              : 'None',
-      'AR Process Level Description'                   : 'None',
-      'FYYear'                                         : fiscalYear,
-      'MonthNumber'                                    : periodNum,
-      /* Amount = 0: prior-year NI has no current-period component        */
-      'Amount'                                         : 0,
-      /* OpeningBalance = full prior-year NI (all pre-dates current period) */
-      'OpeningBalance'                                 : ni,
+      'entity'                                        : reRow['entity'],
+      'Entity Entity Description'                     : reRow['subname'],
+      'account'                                       : '350005',
+      'Account Account Description'                   : 'Equity | Operations : Retained Earnings / Deficit',
+      'Department/SBR'                                : null,
+      'Department/SBR Department SBR Description'     : null,
+      'Funds'                                         : null,
+      'Period'                                        : periodNum,
+      'Category'                                      : null,
+      'Category Description'                          : null,
+      'Rebate Vendors'                                : null,
+      'Rebate Vendor Description'                     : null,
+      'SBR COGS'                                      : 'None',
+      'SBR COGS Description'                          : 'None',
+      'SBR Sales'                                     : 'None',
+      'SBR Sales Description'                         : 'None',
+      'Professional Fees'                             : 'None',
+      'Professional Fee Description'                  : 'None',
+      'Marketing Campaigns'                           : 'None',
+      'Marketing Campaign Description'                : 'None',
+      'Licensing Products'                            : null,
+      'Licensing Product Description'                 : null,
+      'Programs'                                      : 'None',
+      'Program Description'                           : 'None',
+      'Licensing Manufacturers'                       : null,
+      'Licensing Manufacturer Description'            : null,
+      'Licensing Retailers'                           : null,
+      'Licensing Retailer Description'                : null,
+      'Manufacturing and Warehousing COGS'            : 'None',
+      'Manufacturing and Warehouse COGS Description'  : 'None',
+      'Manufacturing and Warehousing Sales'           : 'None',
+      'Manufacturing and Warehouse Sales Description' : 'None',
+      'AR Process Levels'                             : 'None',
+      'AR Process Level Description'                  : 'None',
+      'FYYear'                                        : fiscalYear,
+      'MonthNumber'                                   : periodNum,
+      /* Amount = 0: prior-year NI has no current-period component         */
+      'Amount'                                        : 0,
+      /* OpeningBalance = full prior-year NI (all predates current period) */
+      'OpeningBalance'                                : ni,
       /* YTDAmount = OpeningBalance + Amount = NI + 0 = NI (BS cumulative) */
-      'YTDAmount'                                      : ni
+      'YTDAmount'                                     : ni
     };
   };
 
@@ -435,9 +443,9 @@ define(['N/query', 'N/file', 'N/runtime', 'N/log'], (query, file, runtime, log) 
     }
 
     return {
-      rows            : combinedRows,
-      totalRecords    : pagedData.count,
-      hasMore         : endPageIndex < totalInternalPages,
+      rows             : combinedRows,
+      totalRecords     : pagedData.count,
+      hasMore          : endPageIndex < totalInternalPages,
       totalPagesbyBatch: totalPagesbyBatch - 1
     };
   };
