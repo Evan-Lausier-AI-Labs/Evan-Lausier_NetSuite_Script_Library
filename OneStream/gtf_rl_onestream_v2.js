@@ -31,18 +31,11 @@
 * OthIncome is currently $0 at GTF (confirmed: prior gap ties to within $1 without it),
 * but must be present for correctness and to handle any future OthIncome postings.
 *
-* Fix (2026-03-23): Split RE roll-forward into two separate synthetic queries.
-* The original buildRetainedEarningsRollForwardSQL summed ALL prior-year IS activity
-* by subsidiary with no fund filter. For Ad Fund entities (165, 187, 203, 226, 244,
-* 260, 280) this caused fund-segmented IS net income to be injected into 350005
-* instead of 3005, overcounting 350005 and leaving account 3005 with no roll-forward.
-*
-* Resolution: buildRetainedEarningsRollForwardSQL now adds tl.cseg_fund IS NULL so
-* it captures only non-fund Ops IS net income, correctly attributed to 350005.
-* New buildAdFundRollForwardSQL captures fund-segmented IS grouped by entity AND
-* fund segment, injecting synthetic rows on account 3005 with the fund dimension
-* populated -- mirroring exactly how AX closed Ad Fund P&L to fund-dimensioned RE.
-* Both queries remain self-correcting against a future NS year-end close.
+* Revert (2026-03-23): Rolled back 3005 Ad Fund split introduced in 153b42b.
+* The fund-segmented IS split produced unexpected results during Mike Kincaid's
+* validation. Reverting to the stable ed803d8 state (350005 roll-forward only,
+* all IS activity regardless of fund dimension) pending further investigation
+* into the correct 3005 treatment.
 */
 
 define(['N/query', 'N/file', 'N/runtime', 'N/log'], (query, file, runtime, log) => {
@@ -303,18 +296,21 @@ define(['N/query', 'N/file', 'N/runtime', 'N/log'], (query, file, runtime, log) 
     `;
 
   /*
-   * 350005 roll-forward: non-fund Ops IS net income by subsidiary.
+   * Secondary query: prior-year IS net income by subsidiary.
    *
-   * Filters tl.cseg_fund IS NULL so that only non-fund IS activity is
-   * captured here. Fund-segmented IS activity is handled separately by
-   * buildAdFundRollForwardSQL and injected on account 3005.
+   * Sums all IS account types (Income, Expense, OthExpense, COGS, OthIncome)
+   * for all fiscal years strictly before the requested period year. Results are
+   * injected as synthetic rows on account 350005 to mirror NetSuite's dynamic
+   * RE roll-forward on Balance Sheet reports.
    *
-   * Self-correcting: once NS year-end close (Manual Close) is run for a
-   * given year, IS balances for that year drop to zero automatically.
-   * NS Automatic Close does NOT post physical JEs so this synthetic fix
-   * remains necessary regardless of period close status.
+   * Self-correcting: once NetSuite year-end close (Manual Close) is run for a
+   * given year, closing JEs zero out the IS account balances for that year,
+   * causing this query to return 0 for it automatically -- no double-counting.
+   * NetSuite's recommended Automatic Close does NOT post physical JEs, so this
+   * synthetic fix remains necessary regardless of period close status.
    *
-   * Two bound parameters: both set to periodName for year comparison.
+   * Two bound parameters required: both set to periodName, used for year
+   * comparison in WHERE clause.
    */
   const buildRetainedEarningsRollForwardSQL = () => `
       SELECT
@@ -340,7 +336,6 @@ define(['N/query', 'N/file', 'N/runtime', 'N/log'], (query, file, runtime, log) 
         AND ap.isinactive = 'F'
         AND ap.isquarter = 'F'
         AND ap.isyear = 'F'
-        AND tl.cseg_fund IS NULL
         AND SUBSTR(ap.periodname, INSTR(ap.periodname, ' ') + 1)
               < SUBSTR(?, INSTR(?, ' ') + 1)
       GROUP BY sub.externalid
@@ -348,74 +343,24 @@ define(['N/query', 'N/file', 'N/runtime', 'N/log'], (query, file, runtime, log) 
     `;
 
   /*
-   * 3005 roll-forward: fund-segmented Ad Fund IS net income by subsidiary and fund.
-   *
-   * Filters tl.cseg_fund IS NOT NULL so that only fund-dimensioned IS activity is
-   * captured. Results are grouped by entity AND fund segment and injected as synthetic
-   * rows on account 3005 with the fund dimension populated, mirroring exactly how AX
-   * closed Ad Fund P&L to fund-dimensioned RE at year-end.
-   *
-   * Self-correcting: same as the 350005 query above.
-   *
-   * Two bound parameters: both set to periodName for year comparison.
+   * Maps a RE roll-forward result row into the same column shape as the
+   * main query output. Attributed to account 350005 with null dimensions.
+   * Amount = 0 (no current-period activity); OpeningBalance = YTDAmount =
+   * the full prior-year net income (cumulative BS account logic).
    */
-  const buildAdFundRollForwardSQL = () => `
-      SELECT
-        sub.externalid                                 AS entity,
-        MAX(sub.name)                                  AS subname,
-        tl.cseg_fund                                   AS fund_id,
-        MAX(BUILTIN.DF(tl.cseg_fund))                  AS fund_display,
-        SUM(NVL(tal.debit, 0) - NVL(tal.credit, 0))  AS prior_year_ni
-      FROM transaction t
-      JOIN transactionline tl
-        ON t.id = tl.transaction
-      JOIN transactionaccountingline tal
-        ON tal.transaction = tl.transaction
-        AND tal.transactionline = tl.id
-      JOIN account acc
-        ON acc.id = tal.account
-      JOIN accountingperiod ap
-        ON ap.id = t.postingperiod
-      LEFT JOIN subsidiary sub
-        ON sub.id = tl.subsidiary
-      WHERE t.type IN ('CustInvc', 'Journal')
-        AND t.posting = 'T'
-        AND tal.accountingbook = 1
-        AND acc.accttype IN ('Income', 'Expense', 'OthExpense', 'COGS', 'OthIncome')
-        AND ap.isinactive = 'F'
-        AND ap.isquarter = 'F'
-        AND ap.isyear = 'F'
-        AND tl.cseg_fund IS NOT NULL
-        AND SUBSTR(ap.periodname, INSTR(ap.periodname, ' ') + 1)
-              < SUBSTR(?, INSTR(?, ' ') + 1)
-      GROUP BY sub.externalid, tl.cseg_fund
-      HAVING SUM(NVL(tal.debit, 0) - NVL(tal.credit, 0)) <> 0
-    `;
-
-  /*
-   * Shared helper: maps a roll-forward result row into the full column shape
-   * expected by OneStream. Handles both the 350005 (Ops RE) and 3005 (Ad Fund RE)
-   * cases via the account, acctDescription, and fund parameters.
-   *
-   * For 350005 rows: fund is null (no fund dimension on Ops RE).
-   * For 3005 rows:   fund is the display value of the fund segment (e.g. 'FD0009').
-   *
-   * Amount = 0 (no current-period component for prior-year NI).
-   * OpeningBalance = YTDAmount = prior_year_ni (BS cumulative account logic).
-   */
-  const buildSyntheticRow = (row, periodName, account, acctDescription, fund) => {
+  const buildSyntheticRERow = (reRow, periodName) => {
     const periodNum  = String(parseInt(periodName.substring(1, periodName.indexOf(' ')), 10));
     const fiscalYear = parseInt(periodName.substring(periodName.indexOf(' ') + 1), 10);
-    const ni         = row['prior_year_ni'] || 0;
+    const ni         = reRow['prior_year_ni'] || 0;
 
     return {
-      'entity'                                        : row['entity'],
-      'Entity Entity Description'                     : row['subname'],
-      'account'                                       : account,
-      'Account Account Description'                   : acctDescription,
+      'entity'                                        : reRow['entity'],
+      'Entity Entity Description'                     : reRow['subname'],
+      'account'                                       : '350005',
+      'Account Account Description'                   : 'Equity | Operations : Retained Earnings / Deficit',
       'Department/SBR'                                : null,
       'Department/SBR Department SBR Description'     : null,
-      'Funds'                                         : fund || null,
+      'Funds'                                         : null,
       'Period'                                        : periodNum,
       'Category'                                      : null,
       'Category Description'                          : null,
@@ -445,8 +390,11 @@ define(['N/query', 'N/file', 'N/runtime', 'N/log'], (query, file, runtime, log) 
       'AR Process Level Description'                  : 'None',
       'FYYear'                                        : fiscalYear,
       'MonthNumber'                                   : periodNum,
+      /* Amount = 0: prior-year NI has no current-period component         */
       'Amount'                                        : 0,
+      /* OpeningBalance = full prior-year NI (all predates current period) */
       'OpeningBalance'                                : ni,
+      /* YTDAmount = OpeningBalance + Amount = NI + 0 = NI (BS cumulative) */
       'YTDAmount'                                     : ni
     };
   };
@@ -476,58 +424,28 @@ define(['N/query', 'N/file', 'N/runtime', 'N/log'], (query, file, runtime, log) 
     }
 
     /*
-     * Inject synthetic roll-forward rows on the first batch only.
-     * Subsequent batches contain only paged main query rows to avoid
+     * Inject synthetic RE roll-forward rows on the first batch only.
+     * Subsequent batches contain only the paged main query rows to avoid
      * duplicating the synthetic rows across multiple OneStream batch calls.
      */
     if (batchIndex === 0) {
-
-      /* 350005: non-fund Ops IS net income by subsidiary */
       try {
         const reSql     = buildRetainedEarningsRollForwardSQL();
         const reResults = query.runSuiteQL({
           query  : reSql,
           params : [periodName, periodName]
         });
+
         const reRows = reResults.asMappedResults();
-        log.debug('350005 RE roll-forward rows', JSON.stringify(reRows));
-        reRows.forEach(row => {
-          combinedRows.push(buildSyntheticRow(
-            row,
-            periodName,
-            '350005',
-            'Equity | Operations : Retained Earnings / Deficit',
-            null
-          ));
+        log.debug('RE roll-forward rows', JSON.stringify(reRows));
+
+        reRows.forEach(reRow => {
+          combinedRows.push(buildSyntheticRERow(reRow, periodName));
         });
       } catch (e) {
-        log.error('350005 RE roll-forward query failed', e.message);
-        /* Non-fatal: log and continue */
+        log.error('RE roll-forward query failed', e.message);
+        /* Non-fatal: log and continue; main query results still returned */
       }
-
-      /* 3005: fund-segmented Ad Fund IS net income by subsidiary and fund */
-      try {
-        const afSql     = buildAdFundRollForwardSQL();
-        const afResults = query.runSuiteQL({
-          query  : afSql,
-          params : [periodName, periodName]
-        });
-        const afRows = afResults.asMappedResults();
-        log.debug('3005 Ad Fund roll-forward rows', JSON.stringify(afRows));
-        afRows.forEach(row => {
-          combinedRows.push(buildSyntheticRow(
-            row,
-            periodName,
-            '3005',
-            'Retained Earnings | Ad Funds : Retained Earnings / Accumulated Deficit',
-            row['fund_display'] || null
-          ));
-        });
-      } catch (e) {
-        log.error('3005 Ad Fund roll-forward query failed', e.message);
-        /* Non-fatal: log and continue */
-      }
-
     }
 
     return {
