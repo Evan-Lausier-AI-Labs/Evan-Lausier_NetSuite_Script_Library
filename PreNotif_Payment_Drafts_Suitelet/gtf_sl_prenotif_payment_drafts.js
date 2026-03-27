@@ -6,7 +6,7 @@
  * GTF | Pre-Notification Franchise Payment Drafts
  *
  * Replicates saved search customsearch_gtf_prenotif_child_custom_8 with one
- * enhancement: adds "First Line Item" column via correlated subquery.
+ * enhancement: adds "First Line Item" column via two-step item lookup.
  *
  * Renders inside the NS chrome using serverWidget (nav bar preserved).
  * Filters are applied server-side — only 100 rows fetched per page load.
@@ -236,12 +236,14 @@ define(['N/query', 'N/log', 'N/ui/serverWidget'], (query, log, serverWidget) => 
 
     /**
      * Fetches the display name of the first non-main, non-tax line item for
-     * each transaction in txnIds. Uses a targeted IN list (max 1000 IDs) so
-     * it scans only the rows for the current page — not the full table.
-     * Returns a map of { transactionId: displayname }.
+     * each transaction in txnIds.
      *
-     * Note: correlated subqueries are silently dropped by the N/query SEARCH
-     * channel, so we must use this two-step approach instead.
+     * IMPORTANT: transactionline.id is a per-transaction line sequence number
+     * (1, 2, 3…), NOT a globally unique surrogate key. The JOIN back to
+     * transactionline must include BOTH transaction AND id to avoid matching
+     * line 1 from unrelated transactions across the whole table.
+     *
+     * Returns a map of { transactionId (string) -> displayname }.
      */
     const fetchFirstLineItems = (txnIds) => {
         if (!txnIds || txnIds.length === 0) return {};
@@ -257,7 +259,8 @@ define(['N/query', 'N/log', 'N/ui/serverWidget'], (query, log, serverWidget) => 
                   AND transaction IN (${idList})
                 GROUP BY transaction
             ) tl_min
-            JOIN transactionline tl_first ON tl_first.id = tl_min.min_id
+            JOIN transactionline tl_first ON tl_first.transaction = tl_min.transaction
+                                          AND tl_first.id         = tl_min.min_id
             JOIN item i ON i.id = tl_first.item
         `;
         const rs  = query.runSuiteQL({ query: sql });
