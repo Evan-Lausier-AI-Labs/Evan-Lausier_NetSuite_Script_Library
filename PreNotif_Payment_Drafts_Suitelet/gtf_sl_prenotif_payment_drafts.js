@@ -7,7 +7,7 @@
  *
  * Replicates saved search customsearch_gtf_prenotif_child_custom_8 with one
  * enhancement: adds "Payment Note(Memo)" column showing the first line item
- * display name via two-step item lookup.
+ * name/number (item.itemid) via two-step item lookup.
  *
  * Renders inside the NS chrome using serverWidget (nav bar preserved).
  * Filters are applied server-side — only 100 rows fetched per page load.
@@ -22,13 +22,18 @@
  *
  * Fix (2026-03-31b):
  *   - Renamed "Add Memo" → "Invoice Memo"
- *   - "Payment Note(Memo)" now shows first line item display name
- *     (replaces the bank-account CASE statement)
+ *   - "Payment Note(Memo)" now shows first line item name/number (itemid),
+ *     falling back to line memo for lines without an item record.
+ *     Replaces the bank-account CASE statement.
  *   - Removed redundant standalone "First Line Item" column
  *   - fetchFirstLineItems now batches IDs in chunks of 500 (avoids the
  *     5,000-row runSuiteQL cap that caused ~48% of rows to be blank on
  *     full exports) and uses LEFT JOIN on item so lines without an item
  *     record fall back to the line memo field
+ *
+ * Fix (2026-03-31c):
+ *   - Payment Note(Memo) uses item.itemid (item name/number) instead of
+ *     item.displayname
  */
 
 define(['N/query', 'N/log', 'N/ui/serverWidget'], (query, log, serverWidget) => {
@@ -50,7 +55,7 @@ define(['N/query', 'N/log', 'N/ui/serverWidget'], (query, log, serverWidget) => 
         'Date',                     // 6
         'Invoice Memo',             // 7  (was "Add Memo")
         'AR Account External ID',   // 8
-        'Payment Note(Memo)',       // 9  ← first line item display name
+        'Payment Note(Memo)',       // 9  ← first line item.itemid
         'Bank Account External ID', // 10
         'GTF Bank Internal ID',     // 11
         'Currency',                 // 12
@@ -240,22 +245,22 @@ define(['N/query', 'N/log', 'N/ui/serverWidget'], (query, log, serverWidget) => 
     };
 
     /**
-     * Fetches the display name of the first non-main, non-tax line item for
-     * each transaction in txnIds.
+     * Fetches the item name/number (item.itemid) of the first non-main,
+     * non-tax line for each transaction in txnIds.
      *
      * Design notes:
      *   - transactionline.id is a per-transaction sequence number (1, 2, 3…),
      *     NOT a global surrogate key. The JOIN back must include both
      *     transaction AND id to avoid cross-transaction collisions.
      *   - Uses LEFT JOIN on item so lines without an item record (description-
-     *     only or service lines) fall back to the line-level memo field rather
-     *     than being silently dropped.
+     *     only or service lines) fall back to tl_first.memo rather than being
+     *     silently dropped.
      *   - IDs are processed in batches of BATCH_SIZE (500) to stay well below
      *     the SuiteQL IN-list limit (1,000) and the runSuiteQL result cap
      *     (5,000 rows). Without batching, full exports of ~9,700 rows had
      *     ~4,700 blank Payment Note(Memo) values.
      *
-     * Returns a map of { transactionId (string) -> display value }.
+     * Returns a map of { transactionId (string) -> item name/number string }.
      */
     const fetchFirstLineItems = (txnIds) => {
         if (!txnIds || txnIds.length === 0) return {};
@@ -266,7 +271,7 @@ define(['N/query', 'N/log', 'N/ui/serverWidget'], (query, log, serverWidget) => 
             const idList = batch.join(',');
             const sql = `
                 SELECT tl_min.transaction,
-                       NVL(i.displayname, NVL(i.itemid, tl_first.memo)) AS display_val
+                       NVL(i.itemid, tl_first.memo) AS item_val
                 FROM (
                     SELECT transaction, MIN(id) AS min_id
                     FROM transactionline
@@ -290,7 +295,7 @@ define(['N/query', 'N/log', 'N/ui/serverWidget'], (query, log, serverWidget) => 
 
     /**
      * Overwrites the NULL placeholder at column index 9 ("Payment Note(Memo)")
-     * with the first line item display value from fetchFirstLineItems.
+     * with the first line item name/number from fetchFirstLineItems.
      */
     const mergeFirstLineItems = (rows) => {
         const txnIds = rows.map(r => r[0]).filter(Boolean);
