@@ -6,7 +6,8 @@
  * GTF | Pre-Notification Franchise Payment Drafts
  *
  * Replicates saved search customsearch_gtf_prenotif_child_custom_8 with one
- * enhancement: adds "First Line Item" column via two-step item lookup.
+ * enhancement: adds "Payment Note(Memo)" column showing the first line item
+ * display name via two-step item lookup.
  *
  * Renders inside the NS chrome using serverWidget (nav bar preserved).
  * Filters are applied server-side — only 100 rows fetched per page load.
@@ -15,11 +16,19 @@
  * Script ID:    customscript_gtf_sl_prenotif_drafts
  * Deploy ID:    customdeploy_store_level_payment_draft
  *
- * Fix (2026-03-31): baseUrl was stripped of query string by split('?')[0],
- * which removed the required script= and deploy= parameters from all
- * generated hrefs (export button, pagination, filter apply, reset).
- * Now scriptId and deployId are extracted from the incoming request and
- * re-appended to every constructed URL.
+ * Fix (2026-03-31a): baseUrl stripped of query string by split('?')[0],
+ *   removing required script= and deploy= from all generated hrefs.
+ *   Now scriptId/deployId extracted from incoming request and re-appended.
+ *
+ * Fix (2026-03-31b):
+ *   - Renamed "Add Memo" → "Invoice Memo"
+ *   - "Payment Note(Memo)" now shows first line item display name
+ *     (replaces the bank-account CASE statement)
+ *   - Removed redundant standalone "First Line Item" column
+ *   - fetchFirstLineItems now batches IDs in chunks of 500 (avoids the
+ *     5,000-row runSuiteQL cap that caused ~48% of rows to be blank on
+ *     full exports) and uses LEFT JOIN on item so lines without an item
+ *     record fall back to the line memo field
  */
 
 define(['N/query', 'N/log', 'N/ui/serverWidget'], (query, log, serverWidget) => {
@@ -28,27 +37,27 @@ define(['N/query', 'N/log', 'N/ui/serverWidget'], (query, log, serverWidget) => 
     // Constants
     // -------------------------------------------------------------------------
 
-    const PAGE_SIZE = 100;
+    const PAGE_SIZE   = 100;
+    const BATCH_SIZE  = 500;   // max IDs per fetchFirstLineItems call
 
     const COLUMNS = [
-        'Internal ID',           // 0
-        'Add Payment Number',    // 1
-        'Payment Preference',    // 2
-        'Customer Internal ID',  // 3
-        'Subsidiary External ID',// 4
-        'Bank Account to Draft', // 5
-        'Date',                  // 6
-        'Add Memo',              // 7
-        'AR Account External ID',// 8
-        'Payment Note(Memo)',    // 9
+        'Internal ID',              // 0
+        'Add Payment Number',       // 1
+        'Payment Preference',       // 2
+        'Customer Internal ID',     // 3
+        'Subsidiary External ID',   // 4
+        'Bank Account to Draft',    // 5
+        'Date',                     // 6
+        'Invoice Memo',             // 7  (was "Add Memo")
+        'AR Account External ID',   // 8
+        'Payment Note(Memo)',       // 9  ← first line item display name
         'Bank Account External ID', // 10
-        'GTF Bank Internal ID',  // 11
-        'Currency',              // 12
-        'Payment Amount',        // 13
-        'Apply to Invoice ID',   // 14
-        'For Electronic Payment',// 15
-        'First Line Item',       // 16
-        'Undeposited Funds'      // 17
+        'GTF Bank Internal ID',     // 11
+        'Currency',                 // 12
+        'Payment Amount',           // 13
+        'Apply to Invoice ID',      // 14
+        'For Electronic Payment',   // 15
+        'Undeposited Funds'         // 16
     ];
 
     // Base FROM — shared by all queries
@@ -75,7 +84,7 @@ define(['N/query', 'N/log', 'N/ui/serverWidget'], (query, log, serverWidget) => 
     `;
 
     // Full SELECT — used for data pages and export.
-    // "First Line Item" is NULL here; fetchFirstLineItems() fills it in JS.
+    // "Payment Note(Memo)" is NULL here; fetchFirstLineItems() fills it in JS.
     const DATA_SELECT = `
         SELECT
             t.id                                                                AS "Internal ID",
@@ -85,34 +94,15 @@ define(['N/query', 'N/log', 'N/ui/serverWidget'], (query, log, serverWidget) => 
             sub.externalid                                                      AS "Subsidiary External ID",
             sub.custrecord_gtf_bank_account_number                              AS "Bank Account to Draft",
             TO_CHAR(t.trandate, 'MM/DD/YYYY')                                  AS "Date",
-            t.memo                                                              AS "Add Memo",
+            t.memo                                                              AS "Invoice Memo",
             a.externalid                                                        AS "AR Account External ID",
-            CASE sub.custrecord_gtf_bank_account_number
-                WHEN '1001'   THEN 'AdFund and LAG related charges'
-                WHEN '100101' THEN 'POS support and vendor charges'
-                WHEN '100203' THEN 'Royalties and brand related charges'
-                WHEN '100204' THEN 'Royalties and brand related charges'
-                WHEN '100205' THEN 'Royalties and brand related charges'
-                WHEN '100206' THEN 'Royalties and brand related charges'
-                WHEN '100207' THEN 'Royalties and brand related charges'
-                WHEN '100208' THEN 'Royalties and brand related charges'
-                WHEN '100209' THEN 'Royalties and brand related charges'
-                WHEN '1002'   THEN 'AdFund and AdFund related charges'
-                WHEN '1003'   THEN 'AdFund and AdFund related charges'
-                WHEN '1004'   THEN 'AdFund and AdFund related charges'
-                WHEN '1005'   THEN 'AdFund and AdFund related charges'
-                WHEN '1006'   THEN 'AdFund and AdFund related charges'
-                WHEN '1007'   THEN 'AdFund and AdFund related charges'
-                WHEN '1008'   THEN 'AdFund and AdFund related charges'
-                ELSE ''
-            END                                                                 AS "Payment Note(Memo)",
+            NULL                                                                AS "Payment Note(Memo)",
             sub.custrecord_gtf_bank_account_number                              AS "Bank Account External ID",
             sub.custrecord4                                                      AS "GTF Bank Internal ID",
             BUILTIN.DF(t.currency)                                              AS "Currency",
             REPLACE(TO_CHAR(t.foreigntotal), ',', '')                          AS "Payment Amount",
             t.id                                                                AS "Apply to Invoice ID",
             'TRUE'                                                              AS "For Electronic Payment",
-            NULL                                                                AS "First Line Item",
             'FALSE'                                                             AS "Undeposited Funds"
     `;
 
@@ -126,7 +116,7 @@ define(['N/query', 'N/log', 'N/ui/serverWidget'], (query, log, serverWidget) => 
             const exportMode = params.export === '1';
 
             // Preserve script/deploy so every generated URL stays valid
-            const scriptId = params.script  || '';
+            const scriptId = params.script || '';
             const deployId = params.deploy || '';
 
             const filters = {
@@ -212,8 +202,8 @@ define(['N/query', 'N/log', 'N/ui/serverWidget'], (query, log, serverWidget) => 
     `;
 
     const runCountQuery = (filterWhere) => {
-        const sql   = `SELECT t.id ${LIGHT_FROM} ${BASE_WHERE} ${filterWhere} ORDER BY t.id`;
-        const paged = query.runSuiteQLPaged({ query: sql, pageSize: 1000 });
+        const sql    = `SELECT t.id ${LIGHT_FROM} ${BASE_WHERE} ${filterWhere} ORDER BY t.id`;
+        const paged  = query.runSuiteQLPaged({ query: sql, pageSize: 1000 });
         const ranges = paged.pageRanges;
         if (!ranges || ranges.length === 0) return 0;
         const lastPage  = paged.fetch({ index: ranges.length - 1 });
@@ -253,49 +243,61 @@ define(['N/query', 'N/log', 'N/ui/serverWidget'], (query, log, serverWidget) => 
      * Fetches the display name of the first non-main, non-tax line item for
      * each transaction in txnIds.
      *
-     * IMPORTANT: transactionline.id is a per-transaction line sequence number
-     * (1, 2, 3…), NOT a globally unique surrogate key. The JOIN back to
-     * transactionline must include BOTH transaction AND id to avoid matching
-     * line 1 from unrelated transactions across the whole table.
+     * Design notes:
+     *   - transactionline.id is a per-transaction sequence number (1, 2, 3…),
+     *     NOT a global surrogate key. The JOIN back must include both
+     *     transaction AND id to avoid cross-transaction collisions.
+     *   - Uses LEFT JOIN on item so lines without an item record (description-
+     *     only or service lines) fall back to the line-level memo field rather
+     *     than being silently dropped.
+     *   - IDs are processed in batches of BATCH_SIZE (500) to stay well below
+     *     the SuiteQL IN-list limit (1,000) and the runSuiteQL result cap
+     *     (5,000 rows). Without batching, full exports of ~9,700 rows had
+     *     ~4,700 blank Payment Note(Memo) values.
      *
-     * Returns a map of { transactionId (string) -> displayname }.
+     * Returns a map of { transactionId (string) -> display value }.
      */
     const fetchFirstLineItems = (txnIds) => {
         if (!txnIds || txnIds.length === 0) return {};
-        const idList = txnIds.join(',');
-        const sql = `
-            SELECT tl_min.transaction,
-                   NVL(i.displayname, i.itemid) AS displayname
-            FROM (
-                SELECT transaction, MIN(id) AS min_id
-                FROM transactionline
-                WHERE mainline = 'F'
-                  AND taxline  = 'F'
-                  AND transaction IN (${idList})
-                GROUP BY transaction
-            ) tl_min
-            JOIN transactionline tl_first ON tl_first.transaction = tl_min.transaction
-                                          AND tl_first.id         = tl_min.min_id
-            JOIN item i ON i.id = tl_first.item
-        `;
-        const rs  = query.runSuiteQL({ query: sql });
         const map = {};
-        (rs.results || []).forEach(row => {
-            map[String(row.values[0])] = row.values[1] || '';
-        });
+
+        for (let i = 0; i < txnIds.length; i += BATCH_SIZE) {
+            const batch  = txnIds.slice(i, i + BATCH_SIZE);
+            const idList = batch.join(',');
+            const sql = `
+                SELECT tl_min.transaction,
+                       NVL(i.displayname, NVL(i.itemid, tl_first.memo)) AS display_val
+                FROM (
+                    SELECT transaction, MIN(id) AS min_id
+                    FROM transactionline
+                    WHERE mainline = 'F'
+                      AND taxline  = 'F'
+                      AND transaction IN (${idList})
+                    GROUP BY transaction
+                ) tl_min
+                JOIN transactionline tl_first ON tl_first.transaction = tl_min.transaction
+                                              AND tl_first.id         = tl_min.min_id
+                LEFT JOIN item i ON i.id = tl_first.item
+            `;
+            const rs = query.runSuiteQL({ query: sql });
+            (rs.results || []).forEach(row => {
+                map[String(row.values[0])] = row.values[1] || '';
+            });
+        }
+
         return map;
     };
 
     /**
-     * Overwrites the NULL placeholder at column index 16 ("First Line Item")
-     * with the item display name looked up by fetchFirstLineItems.
+     * Overwrites the NULL placeholder at column index 9 ("Payment Note(Memo)")
+     * with the first line item display value from fetchFirstLineItems.
      */
     const mergeFirstLineItems = (rows) => {
         const txnIds = rows.map(r => r[0]).filter(Boolean);
         const map    = fetchFirstLineItems(txnIds);
         return rows.map(r => {
             const copy = r.slice();
-            copy[16] = map[String(r[0])] || '';
+            copy[9] = map[String(r[0])] || '';   // index 9 = "Payment Note(Memo)"
             return copy;
         });
     };
