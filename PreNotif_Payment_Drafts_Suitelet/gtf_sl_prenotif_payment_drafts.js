@@ -13,7 +13,13 @@
  * Export downloads all filtered rows as CSV.
  *
  * Script ID:    customscript_gtf_sl_prenotif_drafts
- * Deploy ID:    customdeploy_gtf_sl_prenotif_drafts
+ * Deploy ID:    customdeploy_store_level_payment_draft
+ *
+ * Fix (2026-03-31): baseUrl was stripped of query string by split('?')[0],
+ * which removed the required script= and deploy= parameters from all
+ * generated hrefs (export button, pagination, filter apply, reset).
+ * Now scriptId and deployId are extracted from the incoming request and
+ * re-appended to every constructed URL.
  */
 
 define(['N/query', 'N/log', 'N/ui/serverWidget'], (query, log, serverWidget) => {
@@ -25,24 +31,24 @@ define(['N/query', 'N/log', 'N/ui/serverWidget'], (query, log, serverWidget) => 
     const PAGE_SIZE = 100;
 
     const COLUMNS = [
-        'Internal ID',
-        'Add Payment Number',
-        'Payment Preference',
-        'Customer Internal ID',
-        'Subsidiary External ID',
-        'Bank Account to Draft',
-        'Date',
-        'Add Memo',
-        'AR Account External ID',
-        'Payment Note(Memo)',
-        'Bank Account External ID',
-        'GTF Bank Internal ID',
-        'Currency',
-        'Payment Amount',
-        'Apply to Invoice ID',
-        'For Electronic Payment',
-        'First Line Item',
-        'Undeposited Funds'
+        'Internal ID',           // 0
+        'Add Payment Number',    // 1
+        'Payment Preference',    // 2
+        'Customer Internal ID',  // 3
+        'Subsidiary External ID',// 4
+        'Bank Account to Draft', // 5
+        'Date',                  // 6
+        'Add Memo',              // 7
+        'AR Account External ID',// 8
+        'Payment Note(Memo)',    // 9
+        'Bank Account External ID', // 10
+        'GTF Bank Internal ID',  // 11
+        'Currency',              // 12
+        'Payment Amount',        // 13
+        'Apply to Invoice ID',   // 14
+        'For Electronic Payment',// 15
+        'First Line Item',       // 16
+        'Undeposited Funds'      // 17
     ];
 
     // Base FROM — shared by all queries
@@ -119,6 +125,10 @@ define(['N/query', 'N/log', 'N/ui/serverWidget'], (query, log, serverWidget) => 
             const params     = ctx.request.parameters;
             const exportMode = params.export === '1';
 
+            // Preserve script/deploy so every generated URL stays valid
+            const scriptId = params.script  || '';
+            const deployId = params.deploy || '';
+
             const filters = {
                 brand : sanitize(params.f_brand || ''),
                 store : sanitize(params.f_store || ''),
@@ -134,7 +144,7 @@ define(['N/query', 'N/log', 'N/ui/serverWidget'], (query, log, serverWidget) => 
             if (exportMode) {
                 streamCsv(ctx, filterWhere);
             } else {
-                renderPage(ctx, filters, filterWhere, page);
+                renderPage(ctx, filters, filterWhere, page, scriptId, deployId);
             }
 
         } catch (e) {
@@ -150,13 +160,18 @@ define(['N/query', 'N/log', 'N/ui/serverWidget'], (query, log, serverWidget) => 
     // Page renderer — uses serverWidget so NS nav bar is preserved
     // -------------------------------------------------------------------------
 
-    const renderPage = (ctx, filters, filterWhere, page) => {
+    const renderPage = (ctx, filters, filterWhere, page, scriptId, deployId) => {
         const dropdowns  = runDropdownQuery(filterWhere);
         const total      = runCountQuery(filterWhere);
         const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
         const safePage   = Math.min(page, totalPages);
         const rows       = runPageQuery(filterWhere, safePage);
-        const baseUrl    = ctx.request.url.split('?')[0];
+
+        // Build baseUrl with script/deploy preserved so all child URLs are valid
+        const rawBase = ctx.request.url.split('?')[0];
+        const baseUrl = rawBase
+            + '?script=' + encodeURIComponent(scriptId)
+            + '&deploy=' + encodeURIComponent(deployId);
 
         const form = serverWidget.createForm({
             title: 'GTF | Pre-Notification Franchise Payment Drafts'
@@ -312,6 +327,7 @@ define(['N/query', 'N/log', 'N/ui/serverWidget'], (query, log, serverWidget) => 
 
     const buildHtml = (rows, filters, dropdowns, page, totalPages, total, baseUrl) => {
 
+        // baseUrl already contains ?script=...&deploy=... so append with &
         const buildUrl = (overrides) => {
             const p = Object.assign({
                 f_brand: filters.brand,
@@ -326,7 +342,7 @@ define(['N/query', 'N/log', 'N/ui/serverWidget'], (query, log, serverWidget) => 
                 .filter(([, v]) => v !== '' && v !== null && v !== undefined)
                 .map(([k, v]) => encodeURIComponent(k) + '=' + encodeURIComponent(v))
                 .join('&');
-            return baseUrl + (qs ? '?' + qs : '');
+            return baseUrl + (qs ? '&' + qs : '');
         };
 
         const exportUrl = buildUrl({ export: '1', page: '' });
@@ -486,6 +502,7 @@ define(['N/query', 'N/log', 'N/ui/serverWidget'], (query, log, serverWidget) => 
 
 <script>
 (function() {
+  // baseUrl already includes ?script=...&deploy=... — append filters with &
   var baseUrl = ${JSON.stringify(baseUrl)};
 
   window.applyFilters = function() {
@@ -503,7 +520,7 @@ define(['N/query', 'N/log', 'N/ui/serverWidget'], (query, log, serverWidget) => 
     if (from)  params.push('f_from='  + encodeURIComponent(from));
     if (to)    params.push('f_to='    + encodeURIComponent(to));
     params.push('page=1');
-    window.location.href = baseUrl + (params.length ? '?' + params.join('&') : '');
+    window.location.href = baseUrl + (params.length ? '&' + params.join('&') : '');
   };
 
   var storeInput = document.getElementById('f-store');
