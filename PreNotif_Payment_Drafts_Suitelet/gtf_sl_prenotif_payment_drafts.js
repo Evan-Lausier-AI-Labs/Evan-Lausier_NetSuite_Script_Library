@@ -26,9 +26,10 @@
  *   default). N/search.runPaged collects matching invoice IDs; those IDs drive
  *   all SuiteQL queries so column structure is fully preserved. Additional
  *   filters (brand, store, etc.) are applied on top of saved search IDs.
- * Fix (2026-04-01c): runSavedSearchIds — page.data.each() is not available
- *   in Suitelet context; use page.data.results.forEach() instead, which is
- *   consistent with the SuiteQL paged API pattern used elsewhere.
+ * Fix (2026-04-01c): runSavedSearchIds — page.data is a plain array in
+ *   Suitelet context, not a ResultSet. Use (page.data || []).forEach()
+ *   directly instead of page.data.results or page.data.each().
+ * Chore (2026-04-01d): Page titles renamed to "Payment Drafts".
  */
 
 define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
@@ -187,7 +188,7 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
             + '?script=' + encodeURIComponent(scriptId)
             + '&deploy=' + encodeURIComponent(deployId);
 
-        const form = serverWidget.createForm({ title: 'Store Level Payment Drafts' });
+        const form = serverWidget.createForm({ title: 'Payment Drafts' });
         const htmlField = form.addField({
             id   : 'custpage_results',
             type : serverWidget.FieldType.INLINEHTML,
@@ -208,9 +209,8 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
      * as an array of integers. Uses N/search.runPaged to handle large
      * result sets without hitting the 4,000-row flat run() cap.
      *
-     * Note: page.data.each() is not available in Suitelet context —
-     * page.data.results is used instead, consistent with the SuiteQL
-     * paged API pattern used throughout this script.
+     * In Suitelet context, page.data is a plain array of Result objects —
+     * neither .each() nor .results are available. Use (page.data || []).forEach().
      */
     const runSavedSearchIds = (searchId) => {
         const srch  = search.load({ id: searchId });
@@ -218,7 +218,8 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
         const ids   = [];
         paged.pageRanges.forEach(range => {
             const page = paged.fetch({ index: range.index });
-            (page.data.results || []).forEach(result => {
+            // page.data is a plain array of Result objects in Suitelet context
+            (page.data || []).forEach(result => {
                 ids.push(parseInt(result.id, 10));
             });
         });
@@ -592,7 +593,7 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
                 </a>`;
         body += `</div>`;
 
-        const form = serverWidget.createForm({ title: 'Store Level Payment Drafts — Creation Results' });
+        const form = serverWidget.createForm({ title: 'Payment Drafts — Creation Results' });
         const htmlField = form.addField({
             id   : 'custpage_results',
             type : serverWidget.FieldType.INLINEHTML,
