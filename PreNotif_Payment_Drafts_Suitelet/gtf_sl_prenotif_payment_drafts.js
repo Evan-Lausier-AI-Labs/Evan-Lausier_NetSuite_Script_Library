@@ -26,6 +26,9 @@
  *   default). N/search.runPaged collects matching invoice IDs; those IDs drive
  *   all SuiteQL queries so column structure is fully preserved. Additional
  *   filters (brand, store, etc.) are applied on top of saved search IDs.
+ * Fix (2026-04-01c): runSavedSearchIds — page.data.each() is not available
+ *   in Suitelet context; use page.data.results.forEach() instead, which is
+ *   consistent with the SuiteQL paged API pattern used elsewhere.
  */
 
 define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
@@ -204,15 +207,19 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
      * Loads the saved search and returns all matching transaction IDs
      * as an array of integers. Uses N/search.runPaged to handle large
      * result sets without hitting the 4,000-row flat run() cap.
+     *
+     * Note: page.data.each() is not available in Suitelet context —
+     * page.data.results is used instead, consistent with the SuiteQL
+     * paged API pattern used throughout this script.
      */
     const runSavedSearchIds = (searchId) => {
         const srch  = search.load({ id: searchId });
         const paged = srch.runPaged({ pageSize: 1000 });
         const ids   = [];
         paged.pageRanges.forEach(range => {
-            paged.fetch({ index: range.index }).data.each(result => {
+            const page = paged.fetch({ index: range.index });
+            (page.data.results || []).forEach(result => {
                 ids.push(parseInt(result.id, 10));
-                return true;
             });
         });
         return ids;
@@ -362,8 +369,7 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
 
     /**
      * Fetches data for one page. filteredIds is already sorted; slice the
-     * correct page and query only those IDs — no paging needed server-side
-     * since we already know exactly which IDs belong on this page.
+     * correct page and query only those IDs.
      */
     const runPageQuery = (filteredIds, page) => {
         const start   = (page - 1) * PAGE_SIZE;
@@ -602,7 +608,6 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
 
     const buildHtml = (rows, filters, dropdowns, page, totalPages, total, baseUrl) => {
 
-        // baseUrl already contains ?script=...&deploy=... — append with &
         const buildUrl = (overrides) => {
             const p = Object.assign({
                 f_search: filters.search,
@@ -621,15 +626,12 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
             return baseUrl + (qs ? '&' + qs : '');
         };
 
-        // Base export URL — JS overrides href to &ids=... when rows are selected
         const exportUrl = buildUrl({ export: '1', page: '' });
 
-        // Saved search options
         const selOptsSavedSearches = SAVED_SEARCHES.map(s =>
             `<option value="${escHtml(s.id)}"${s.id === filters.search ? ' selected' : ''}>${escHtml(s.label)}</option>`
         ).join('');
 
-        // Brand/franc: option value = raw internal ID, label = display name
         const selOptsPairs = (pairs, selectedId) =>
             pairs.map(p => `<option value="${escHtml(p.id)}"${String(p.id) === String(selectedId) ? ' selected' : ''}>${escHtml(p.name)}</option>`).join('');
 
@@ -809,7 +811,6 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
   var baseUrl    = ${JSON.stringify(baseUrl)};
   var exportBase = ${JSON.stringify(exportUrl)};
 
-  // ── Filter apply ──────────────────────────────────────────────────────────
   window.applyFilters = function() {
     var params = [];
     var srch  = document.getElementById('f-search').value;
@@ -834,18 +835,15 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
     if (e.key === 'Enter') applyFilters();
   });
 
-  // ── Checkbox management ───────────────────────────────────────────────────
   function getCheckboxes() { return Array.from(document.querySelectorAll('.pnd-row-cb')); }
   function getChecked()    { return getCheckboxes().filter(function(cb) { return cb.checked; }); }
 
   function updateToolbar() {
     var checked = getChecked();
     var count   = checked.length;
-
     var btn = document.getElementById('pnd-create-btn');
     btn.textContent = '\u25B6 Create Payment Drafts (' + count + ')';
     btn.disabled    = count === 0;
-
     var exportLink = document.getElementById('pnd-export-link');
     if (count > 0) {
       var ids = checked.map(function(cb) { return cb.dataset.id; }).join(',');
@@ -899,13 +897,9 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
     updateToolbar();
   };
 
-  // ── Create payment drafts ─────────────────────────────────────────────────
   window.createSelectedPayments = function() {
     var checked = getChecked().map(function(cb) { return cb.dataset.id; });
-    if (!checked.length) {
-      alert('No records selected.');
-      return;
-    }
+    if (!checked.length) { alert('No records selected.'); return; }
     if (checked.length > ${MAX_CREATE}) {
       alert('Maximum ${MAX_CREATE} records per batch. Currently selected: ' + checked.length + '. Please select fewer records.');
       return;
@@ -934,11 +928,6 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
     // CSV export
     // -------------------------------------------------------------------------
 
-    /**
-     * Streams a CSV response.
-     * If idsParam is provided (selected rows), exports only those IDs.
-     * Otherwise exports all filteredIds (the full filtered result set).
-     */
     const streamCsv = (ctx, filteredIds, idsParam) => {
         const selectedIds = (idsParam || '').split(',').map(s => parseInt(s.trim(), 10)).filter(n => n > 0);
         const rows        = selectedIds.length > 0 ? runRowsByIds(selectedIds) : runRowsByIds(filteredIds);
