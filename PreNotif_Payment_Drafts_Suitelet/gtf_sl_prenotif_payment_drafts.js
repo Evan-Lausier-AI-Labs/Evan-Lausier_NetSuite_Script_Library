@@ -27,9 +27,11 @@
  *   all SuiteQL queries so column structure is fully preserved. Additional
  *   filters (brand, store, etc.) are applied on top of saved search IDs.
  * Fix (2026-04-01c): runSavedSearchIds — page.data is a plain array in
- *   Suitelet context, not a ResultSet. Use (page.data || []).forEach()
- *   directly instead of page.data.results or page.data.each().
+ *   Suitelet context. Use (page.data || []).forEach() directly.
  * Chore (2026-04-01d): Page titles renamed to "Payment Drafts".
+ * Chore (2026-04-01e): Trim saved searches to Store Level and Parent Level
+ *   only. Remove default selection — require explicit choice before loading.
+ *   Prevents fallback-to-Store-Level when Parent Level was selected.
  */
 
 define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
@@ -44,17 +46,13 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
     const MAX_CREATE = 200;   // governance safety cap for payment creation batch
 
     /**
-     * Hardcoded saved search list. First entry is the default.
+     * Hardcoded saved search list. No default — user must select one.
      * To add a search: append { id: 'customsearch_xxx', label: 'Display Name' }.
      */
     const SAVED_SEARCHES = [
-        { id: 'customsearch_gtf_prenotif_child_custom_8',  label: 'Payment Drafts - Store Level' },
-        { id: 'customsearch_gtf_prenotif_child_custom_5',  label: 'Payment Drafts - Parent Level' },
-        { id: 'customsearch_gtf_prenotif_child_custo__2',  label: 'Payment Refunds - Update Bank Details' },
-        { id: 'customsearch_gtf_prenotif_child_custom_9',  label: 'Payment Drafts - Parent Level TEST' },
-        { id: 'customsearch_gtf_prenotif_child_custo_10',  label: 'Payment Drafts - Update Bank Details' }
+        { id: 'customsearch_gtf_prenotif_child_custom_8', label: 'Payment Drafts - Store Level' },
+        { id: 'customsearch_gtf_prenotif_child_custom_5', label: 'Payment Drafts - Parent Level' }
     ];
-    const DEFAULT_SEARCH_ID = SAVED_SEARCHES[0].id;
 
     const COLUMNS = [
         'Internal ID',              // 0
@@ -131,11 +129,12 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
             const scriptId   = params.script  || '';
             const deployId   = params.deploy  || '';
 
-            // Validate saved search selection — fall back to default if invalid
+            // Validate saved search selection — empty string = no selection = no data.
+            // No fallback default: unrecognised or missing f_search renders empty state.
             const rawSearchId = sanitize(params.f_search || '');
             const searchId    = SAVED_SEARCHES.some(s => s.id === rawSearchId)
                                     ? rawSearchId
-                                    : DEFAULT_SEARCH_ID;
+                                    : '';
 
             const filters = {
                 search: searchId,
@@ -150,8 +149,9 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
             const filterWhere = buildFilterWhere(filters);
             const page        = Math.max(1, parseInt(params.page || '1', 10));
 
-            // Run the saved search to get the invoice universe, then filter further
-            const savedIds    = runSavedSearchIds(searchId);
+            // Run the saved search to get the invoice universe, then filter further.
+            // If no search is selected, skip the run and render an empty state.
+            const savedIds    = searchId ? runSavedSearchIds(searchId) : [];
             const filteredIds = getFilteredIds(savedIds, filterWhere);
 
             if (exportMode) {
@@ -211,6 +211,7 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
      *
      * In Suitelet context, page.data is a plain array of Result objects —
      * neither .each() nor .results are available. Use (page.data || []).forEach().
+     * Only called when searchId is non-empty.
      */
     const runSavedSearchIds = (searchId) => {
         const srch  = search.load({ id: searchId });
@@ -232,9 +233,6 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
      *
      * Fast path: if filterWhere is empty, returns savedIds unchanged —
      * no SuiteQL queries needed.
-     *
-     * Otherwise batches savedIds through LIGHT_FROM + WHERE t.id IN (batch)
-     * + filterWhere to find the matching subset.
      */
     const getFilteredIds = (savedIds, filterWhere) => {
         if (!filterWhere || !savedIds.length) return savedIds.slice();
@@ -259,7 +257,6 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
      * Builds additional WHERE clauses from active user-selected filters.
      * Brand and franc use raw internal IDs — BUILTIN.DF() cannot appear
      * in SuiteQL WHERE clauses (SELECT-only function).
-     * The saved search is handled separately via runSavedSearchIds.
      */
     const buildFilterWhere = (f) => {
         const clauses = [];
@@ -274,8 +271,7 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
 
     /**
      * Populates brand, franchisee, and week dropdowns from the full saved
-     * search universe (savedIds — not filtered). Batched in BATCH_SIZE chunks.
-     * Raw internal IDs are used as option values so buildFilterWhere works.
+     * search universe (savedIds). Batched in BATCH_SIZE chunks.
      */
     const runDropdownQuery = (savedIds) => {
         const brandMap = new Map();
@@ -323,13 +319,6 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
     // Data queries
     // -------------------------------------------------------------------------
 
-    /**
-     * Returns item.itemid for the first non-main, non-tax line of each
-     * transaction, falling back to tl.memo for lines without an item.
-     * Batched to avoid the 5,000-row runSuiteQL cap.
-     * transactionline.id is per-transaction — JOIN back must include BOTH
-     * transaction AND id.
-     */
     const fetchFirstLineItems = (txnIds) => {
         if (!txnIds || txnIds.length === 0) return {};
         const map = {};
@@ -368,10 +357,6 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
         });
     };
 
-    /**
-     * Fetches data for one page. filteredIds is already sorted; slice the
-     * correct page and query only those IDs.
-     */
     const runPageQuery = (filteredIds, page) => {
         const start   = (page - 1) * PAGE_SIZE;
         const pageIds = filteredIds.slice(start, start + PAGE_SIZE);
@@ -383,10 +368,6 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
         return mergeFirstLineItems(rows);
     };
 
-    /**
-     * Fetches data for a specific list of IDs — used for export and Create.
-     * Batched in BATCH_SIZE chunks to handle large sets.
-     */
     const runRowsByIds = (ids) => {
         const results = [];
         for (let i = 0; i < ids.length; i += BATCH_SIZE) {
@@ -629,9 +610,12 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
 
         const exportUrl = buildUrl({ export: '1', page: '' });
 
-        const selOptsSavedSearches = SAVED_SEARCHES.map(s =>
-            `<option value="${escHtml(s.id)}"${s.id === filters.search ? ' selected' : ''}>${escHtml(s.label)}</option>`
-        ).join('');
+        // Prompt option first; no fallback default
+        const selOptsSavedSearches =
+            `<option value=""${!filters.search ? ' selected' : ''}>-- Select a Search --</option>` +
+            SAVED_SEARCHES.map(s =>
+                `<option value="${escHtml(s.id)}"${s.id === filters.search ? ' selected' : ''}>${escHtml(s.label)}</option>`
+            ).join('');
 
         const selOptsPairs = (pairs, selectedId) =>
             pairs.map(p => `<option value="${escHtml(p.id)}"${String(p.id) === String(selectedId) ? ' selected' : ''}>${escHtml(p.name)}</option>`).join('');
