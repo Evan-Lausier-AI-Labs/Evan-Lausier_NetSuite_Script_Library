@@ -3,11 +3,11 @@
  * @NScriptType Suitelet
  * @NModuleScope SameAccount
  *
- * GTF | Pre-Notification Franchise Payment Drafts
+ * Store Level Payment Drafts
  *
  * Replicates saved search customsearch_gtf_prenotif_child_custom_8 with
- * enhancements: first line item lookup, per-row checkboxes, and direct
- * Customer Payment creation from selected rows.
+ * enhancements: first line item lookup, per-row checkboxes, selective export,
+ * and direct Customer Payment creation from selected rows.
  *
  * Script ID:    customscript_gtf_sl_prenotif_drafts
  * Deploy ID:    customdeploy_store_level_payment_draft
@@ -17,10 +17,16 @@
  *   itemid; removed redundant First Line Item column; batched lookup.
  * Fix (2026-03-31c): Payment Note(Memo) uses itemid not displayname.
  * Feat (2026-03-31d): Per-row checkboxes, Mark/Unmark All, Create Payment
- *   Drafts button — creates Customer Payment records via N/record using the
- *   same field mapping as import map "HS | Payment Drafting - Parent".
+ *   Drafts button — creates Customer Payment records via N/record.
  *   Max 200 records per batch (governance safety cap).
  * Chore (2026-03-31e): Page titles renamed to "Store Level Payment Drafts".
+ * Fix (2026-04-01):
+ *   - Brand/franc filters: BUILTIN.DF() cannot appear in WHERE — dropdown
+ *     now stores raw internal IDs as option values; buildFilterWhere compares
+ *     c.custentity_gtf_brand and c.parent directly against numeric IDs.
+ *   - Export respects row selection: when rows are checked, Export to CSV
+ *     appends &ids=... and server fetches only those invoice IDs; when no
+ *     rows are checked the full filtered result set is exported as before.
  */
 
 define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record'],
@@ -122,7 +128,7 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record'],
             const page        = Math.max(1, parseInt(params.page || '1', 10));
 
             if (exportMode) {
-                streamCsv(ctx, filterWhere);
+                streamCsv(ctx, filterWhere, params.ids || '');
             } else if (createMode) {
                 createPayments(ctx, params.ids || '', scriptId, deployId);
             } else {
@@ -154,9 +160,7 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record'],
             + '?script=' + encodeURIComponent(scriptId)
             + '&deploy=' + encodeURIComponent(deployId);
 
-        const form = serverWidget.createForm({
-            title: 'Store Level Payment Drafts'
-        });
+        const form = serverWidget.createForm({ title: 'Store Level Payment Drafts' });
         const htmlField = form.addField({
             id   : 'custpage_results',
             type : serverWidget.FieldType.INLINEHTML,
@@ -172,11 +176,18 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record'],
     // Queries — display / export
     // -------------------------------------------------------------------------
 
+    /**
+     * Builds additional WHERE clauses from active filters.
+     *
+     * Brand and franc are stored as raw internal IDs (integers) in the
+     * dropdown option values — BUILTIN.DF() cannot be used in WHERE clauses
+     * in SuiteQL (it is SELECT-only). Comparing raw IDs directly is correct.
+     */
     const buildFilterWhere = (f) => {
         const clauses = [];
-        if (f.brand) clauses.push(`BUILTIN.DF(c.custentity_gtf_brand) = '${f.brand}'`);
+        if (f.brand) clauses.push(`c.custentity_gtf_brand = ${parseInt(f.brand, 10)}`);
         if (f.store) clauses.push(`UPPER(c.externalid) LIKE UPPER('%${f.store}%')`);
-        if (f.franc) clauses.push(`BUILTIN.DF(c.parent) = '${f.franc}'`);
+        if (f.franc) clauses.push(`c.parent = ${parseInt(f.franc, 10)}`);
         if (f.week)  clauses.push(`TO_CHAR(t.custbody_gtf_weekenddate, 'MM/DD/YYYY') = '${f.week}'`);
         if (f.from)  clauses.push(`t.trandate >= TO_DATE('${f.from}', 'YYYY-MM-DD')`);
         if (f.to)    clauses.push(`t.trandate <= TO_DATE('${f.to}', 'YYYY-MM-DD')`);
@@ -202,30 +213,50 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record'],
         return (ranges.length - 1) * 1000 + lastCount;
     };
 
+    /**
+     * Populates filter dropdowns.
+     *
+     * Brand and franc option values are raw internal IDs so that
+     * buildFilterWhere can compare directly without BUILTIN.DF().
+     * The display label shown to the user is still the human-readable name.
+     */
     const runDropdownQuery = (filterWhere) => {
         const sql = `
             SELECT DISTINCT
-                BUILTIN.DF(c.custentity_gtf_brand)                         AS brand,
-                BUILTIN.DF(c.parent)                                        AS master_franc,
-                NVL(TO_CHAR(t.custbody_gtf_weekenddate, 'MM/DD/YYYY'), '') AS week_ending
+                c.custentity_gtf_brand                                             AS brand_id,
+                BUILTIN.DF(c.custentity_gtf_brand)                                 AS brand_name,
+                c.parent                                                            AS franc_id,
+                BUILTIN.DF(c.parent)                                                AS franc_name,
+                NVL(TO_CHAR(t.custbody_gtf_weekenddate, 'MM/DD/YYYY'), '')         AS week_ending
             ${LIGHT_FROM} ${BASE_WHERE} ${filterWhere}
-            ORDER BY 1, 2, 3
+            ORDER BY 2, 4, 5
         `;
         const paged  = query.runSuiteQLPaged({ query: sql, pageSize: 1000 });
-        const brands = new Set();
-        const francs = new Set();
-        const weeks  = new Set();
+
+        // Use Maps keyed by ID to deduplicate across pages
+        const brandMap = new Map();
+        const francMap = new Map();
+        const weeks    = new Set();
+
         paged.pageRanges.forEach(range => {
             const pg = paged.fetch({ index: range.index });
             (pg.data.results || []).forEach(row => {
-                if (row.values[0]) brands.add(String(row.values[0]));
-                if (row.values[1]) francs.add(String(row.values[1]));
-                if (row.values[2]) weeks.add(String(row.values[2]));
+                const [brandId, brandName, francId, francName, week] = row.values;
+                if (brandId && brandName) brandMap.set(String(brandId), String(brandName));
+                if (francId && francName) francMap.set(String(francId), String(francName));
+                if (week) weeks.add(String(week));
             });
         });
+
+        // Sort by display name, preserve id/name pairing
+        const sortPairs = (map) =>
+            Array.from(map.entries())
+                 .map(([id, name]) => ({ id, name }))
+                 .sort((a, b) => a.name.localeCompare(b.name));
+
         return {
-            brands: Array.from(brands).sort(),
-            francs: Array.from(francs).sort(),
+            brands: sortPairs(brandMap),
+            francs: sortPairs(francMap),
             weeks : Array.from(weeks).filter(v => v).sort()
         };
     };
@@ -233,8 +264,8 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record'],
     /**
      * Returns item.itemid for the first non-main, non-tax line of each
      * transaction, falling back to tl.memo for lines without an item.
-     * Batched in chunks of BATCH_SIZE to avoid the 5,000-row runSuiteQL cap.
-     * transactionline.id is a per-transaction sequence number — the JOIN back
+     * Batched to avoid the 5,000-row runSuiteQL cap.
+     * transactionline.id is a per-transaction sequence number — JOIN back
      * must include BOTH transaction AND id.
      */
     const fetchFirstLineItems = (txnIds) => {
@@ -296,19 +327,25 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record'],
         return mergeFirstLineItems(results);
     };
 
+    /**
+     * Fetches only the specific invoice IDs provided — used when the user
+     * has selected rows and clicks Export to CSV.
+     */
+    const runRowsByIds = (ids) => {
+        const results = [];
+        for (let i = 0; i < ids.length; i += BATCH_SIZE) {
+            const idList = ids.slice(i, i + BATCH_SIZE).join(',');
+            const sql    = `${DATA_SELECT} ${BASE_FROM} WHERE t.id IN (${idList}) ORDER BY sub.externalid, t.trandate, t.id`;
+            const rs     = query.runSuiteQL({ query: sql });
+            (rs.results || []).forEach(r => results.push(r.values));
+        }
+        return mergeFirstLineItems(results);
+    };
+
     // -------------------------------------------------------------------------
-    // Payment creation — query
+    // Payment creation — data fetch
     // -------------------------------------------------------------------------
 
-    /**
-     * Fetches all fields needed to create Customer Payment records for the
-     * given invoice IDs. Resolves external IDs to internal IDs inline:
-     *   - bank_acct.id via LEFT JOIN on bank_acct.externalid = sub.custrecord_gtf_bank_account_number
-     *   - ar_acct.id directly from tl.expenseaccount
-     *   - currency, customer, subsidiary all returned as internal IDs
-     *
-     * Matches the field mapping of import map "HS | Payment Drafting - Parent".
-     */
     const fetchCreateData = (txnIds) => {
         if (!txnIds || txnIds.length === 0) return [];
         const results = [];
@@ -396,22 +433,20 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record'],
                     isDynamic : true
                 });
 
-                // Header fields — order matters in dynamic mode:
-                // set customer first so the apply sublist auto-populates
-                rec.setValue({ fieldId: 'customer',                    value: parseInt(row.customerId) });
-                rec.setValue({ fieldId: 'subsidiary',                   value: parseInt(row.subsidiaryId) });
-                rec.setValue({ fieldId: 'account',                      value: parseInt(row.bankAccountId) });
-                rec.setValue({ fieldId: 'aracct',                       value: parseInt(row.arAccountId) });
-                rec.setValue({ fieldId: 'currency',                     value: parseInt(row.currencyId) });
-                rec.setValue({ fieldId: 'trandate',                     value: new Date(row.tranDate + 'T00:00:00') });
-                rec.setValue({ fieldId: 'memo',                         value: row.memo || '' });
-                rec.setValue({ fieldId: 'externalid',                   value: row.paymentNumber });
-                rec.setValue({ fieldId: 'tranid',                       value: row.paymentNumber });
-                rec.setValue({ fieldId: 'payment',                      value: parseFloat(row.paymentAmount) });
-                rec.setValue({ fieldId: 'custbody_9997_is_for_ep_dd',   value: true });
-                rec.setValue({ fieldId: 'undepfunds',                   value: false });
+                // Set customer first — required so apply sublist auto-populates
+                rec.setValue({ fieldId: 'customer',                  value: parseInt(row.customerId) });
+                rec.setValue({ fieldId: 'subsidiary',                 value: parseInt(row.subsidiaryId) });
+                rec.setValue({ fieldId: 'account',                    value: parseInt(row.bankAccountId) });
+                rec.setValue({ fieldId: 'aracct',                     value: parseInt(row.arAccountId) });
+                rec.setValue({ fieldId: 'currency',                   value: parseInt(row.currencyId) });
+                rec.setValue({ fieldId: 'trandate',                   value: new Date(row.tranDate + 'T00:00:00') });
+                rec.setValue({ fieldId: 'memo',                       value: row.memo || '' });
+                rec.setValue({ fieldId: 'externalid',                 value: row.paymentNumber });
+                rec.setValue({ fieldId: 'tranid',                     value: row.paymentNumber });
+                rec.setValue({ fieldId: 'payment',                    value: parseFloat(row.paymentAmount) });
+                rec.setValue({ fieldId: 'custbody_9997_is_for_ep_dd', value: true });
+                rec.setValue({ fieldId: 'undepfunds',                 value: false });
 
-                // Apply sublist — find the target invoice and mark it applied
                 const lineCount = rec.getLineCount({ sublistId: 'apply' });
                 let applied = false;
                 for (let i = 0; i < lineCount; i++) {
@@ -428,13 +463,13 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record'],
 
                 if (!applied) {
                     throw new Error(
-                        `Invoice ${row.txnId} was not found in the apply sublist for customer ${row.customerId}. ` +
+                        `Invoice ${row.txnId} not found in apply sublist for customer ${row.customerId}. ` +
                         `It may already be applied, on hold, or not open.`
                     );
                 }
 
                 const newId = rec.save();
-                results.push({ invoiceId: row.txnId, paymentNumber: row.paymentNumber, success: true,  newId });
+                results.push({ invoiceId: row.txnId, paymentNumber: row.paymentNumber, success: true, newId });
 
             } catch (e) {
                 log.error({ title: 'createPayments ERROR', details: `Invoice ${row.txnId}: ${e.message || e}` });
@@ -536,12 +571,16 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record'],
             return baseUrl + (qs ? '&' + qs : '');
         };
 
+        // Base export URL (all filtered rows) — JS overrides href when rows are selected
         const exportUrl = buildUrl({ export: '1', page: '' });
 
-        const selOpts = (values, selected) =>
+        // Brand/franc dropdowns: option value = raw internal ID, label = display name
+        const selOptsPairs = (pairs, selectedId) =>
+            pairs.map(p => `<option value="${escHtml(p.id)}"${String(p.id) === String(selectedId) ? ' selected' : ''}>${escHtml(p.name)}</option>`).join('');
+
+        const selOptsWeeks = (values, selected) =>
             values.map(v => `<option value="${escHtml(v)}"${v === selected ? ' selected' : ''}>${escHtml(v)}</option>`).join('');
 
-        // Checkbox column prepended before data columns
         const thCells = `<th style="width:32px;text-align:center">
                             <input type="checkbox" id="pnd-check-all" title="Select / deselect all on this page">
                          </th>`
@@ -645,7 +684,7 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record'],
       <label>Brand</label>
       <select id="f-brand">
         <option value="">- All -</option>
-        ${selOpts(dropdowns.brands, filters.brand)}
+        ${selOptsPairs(dropdowns.brands, filters.brand)}
       </select>
     </div>
     <div class="pnd-fg">
@@ -656,14 +695,14 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record'],
       <label>Master Franchisee</label>
       <select id="f-franc">
         <option value="">- All -</option>
-        ${selOpts(dropdowns.francs, filters.franc)}
+        ${selOptsPairs(dropdowns.francs, filters.franc)}
       </select>
     </div>
     <div class="pnd-fg">
       <label>Week Ending Date</label>
       <select id="f-week">
         <option value="">All</option>
-        ${selOpts(dropdowns.weeks, filters.week)}
+        ${selOptsWeeks(dropdowns.weeks, filters.week)}
       </select>
     </div>
     <div class="pnd-fg">
@@ -679,7 +718,7 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record'],
   </div>
 
   <div class="pnd-toolbar">
-    <a class="pnd-btn pnd-export" href="${escHtml(exportUrl)}">&#11015; Export to CSV</a>
+    <a id="pnd-export-link" class="pnd-btn pnd-export" href="${escHtml(exportUrl)}">&#11015; Export to CSV</a>
     <button id="pnd-create-btn" class="pnd-btn pnd-create" onclick="createSelectedPayments()" disabled>
       &#9654; Create Payment Drafts (0)
     </button>
@@ -705,7 +744,8 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record'],
 
 <script>
 (function() {
-  var baseUrl = ${JSON.stringify(baseUrl)};
+  var baseUrl    = ${JSON.stringify(baseUrl)};
+  var exportBase = ${JSON.stringify(exportUrl)};  // full filtered export URL
 
   // ── Filter apply ──────────────────────────────────────────────────────────
   window.applyFilters = function() {
@@ -731,14 +771,33 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record'],
   });
 
   // ── Checkbox management ───────────────────────────────────────────────────
-  function getCheckboxes()  { return Array.from(document.querySelectorAll('.pnd-row-cb')); }
-  function getChecked()     { return getCheckboxes().filter(function(cb) { return cb.checked; }); }
+  function getCheckboxes() { return Array.from(document.querySelectorAll('.pnd-row-cb')); }
+  function getChecked()    { return getCheckboxes().filter(function(cb) { return cb.checked; }); }
 
-  function updateCreateBtn() {
-    var btn     = document.getElementById('pnd-create-btn');
-    var count   = getChecked().length;
+  /**
+   * Updates the Create button count/state and the Export link href.
+   * When rows are selected, Export downloads only those rows.
+   * When nothing is selected, Export downloads the full filtered result.
+   */
+  function updateToolbar() {
+    var checked = getChecked();
+    var count   = checked.length;
+
+    // Create button
+    var btn = document.getElementById('pnd-create-btn');
     btn.textContent = '\u25B6 Create Payment Drafts (' + count + ')';
     btn.disabled    = count === 0;
+
+    // Export link
+    var exportLink = document.getElementById('pnd-export-link');
+    if (count > 0) {
+      var ids = checked.map(function(cb) { return cb.dataset.id; }).join(',');
+      exportLink.href = exportBase + '&ids=' + encodeURIComponent(ids);
+      exportLink.textContent = '\u2B07 Export Selected (' + count + ')';
+    } else {
+      exportLink.href = exportBase;
+      exportLink.textContent = '\u2B07 Export to CSV';
+    }
   }
 
   function updateHeaderCheckbox() {
@@ -754,15 +813,13 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record'],
     var row = cb.closest('tr');
     if (row) row.classList.toggle('pnd-selected', cb.checked);
     updateHeaderCheckbox();
-    updateCreateBtn();
+    updateToolbar();
   }
 
-  // Wire up row checkboxes
   getCheckboxes().forEach(function(cb) {
     cb.addEventListener('change', function() { onRowCheckChange(cb); });
   });
 
-  // Header checkbox — select / deselect all on current page
   var hdrCb = document.getElementById('pnd-check-all');
   if (hdrCb) {
     hdrCb.addEventListener('change', function() {
@@ -771,11 +828,10 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record'],
         var row = cb.closest('tr');
         if (row) row.classList.toggle('pnd-selected', cb.checked);
       });
-      updateCreateBtn();
+      updateToolbar();
     });
   }
 
-  // Mark All / Unmark All buttons
   window.toggleAll = function(checked) {
     getCheckboxes().forEach(function(cb) {
       cb.checked = checked;
@@ -783,7 +839,7 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record'],
       if (row) row.classList.toggle('pnd-selected', checked);
     });
     updateHeaderCheckbox();
-    updateCreateBtn();
+    updateToolbar();
   };
 
   // ── Create payment drafts ─────────────────────────────────────────────────
@@ -794,7 +850,7 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record'],
       return;
     }
     if (checked.length > ${MAX_CREATE}) {
-      alert('Maximum ${MAX_CREATE} records per batch. Currently selected: ' + checked.length + '. Please refine your selection.');
+      alert('Maximum ${MAX_CREATE} records per batch. Currently selected: ' + checked.length + '. Please select fewer records.');
       return;
     }
     if (!confirm('Create ' + checked.length + ' Customer Payment record' + (checked.length !== 1 ? 's' : '') + '?\\nThis cannot be undone.')) {
@@ -813,7 +869,7 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record'],
   };
 
   // Init
-  updateCreateBtn();
+  updateToolbar();
 })();
 </script>`;
     };
@@ -822,9 +878,15 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record'],
     // CSV export
     // -------------------------------------------------------------------------
 
-    const streamCsv = (ctx, filterWhere) => {
-        const rows     = runAllRows(filterWhere);
-        const ts       = formatTimestamp(new Date());
+    /**
+     * Streams a CSV response.
+     * If idsParam is provided (selected rows), exports only those invoice IDs.
+     * Otherwise exports all rows matching the current filters.
+     */
+    const streamCsv = (ctx, filterWhere, idsParam) => {
+        const ids  = (idsParam || '').split(',').map(s => parseInt(s.trim(), 10)).filter(n => n > 0);
+        const rows = ids.length > 0 ? runRowsByIds(ids) : runAllRows(filterWhere);
+        const ts   = formatTimestamp(new Date());
         const filename = `GTF_PreNotif_PaymentDrafts_${ts}.csv`;
         ctx.response.setHeader({ name: 'Content-Type',        value: 'text/csv; charset=utf-8' });
         ctx.response.setHeader({ name: 'Content-Disposition', value: `attachment; filename="${filename}"` });
