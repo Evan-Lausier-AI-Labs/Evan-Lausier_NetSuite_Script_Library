@@ -20,6 +20,7 @@
  *   Drafts button — creates Customer Payment records via N/record using the
  *   same field mapping as import map "HS | Payment Drafting - Parent".
  *   Max 200 records per batch (governance safety cap).
+ * Chore (2026-03-31e): Page titles renamed to "Store Level Payment Drafts".
  */
 
 define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record'],
@@ -154,7 +155,7 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record'],
             + '&deploy=' + encodeURIComponent(deployId);
 
         const form = serverWidget.createForm({
-            title: 'GTF | Pre-Notification Franchise Payment Drafts'
+            title: 'Store Level Payment Drafts'
         });
         const htmlField = form.addField({
             id   : 'custpage_results',
@@ -502,7 +503,7 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record'],
                 </a>`;
         body += `</div>`;
 
-        const form = serverWidget.createForm({ title: 'GTF | Payment Drafts — Creation Results' });
+        const form = serverWidget.createForm({ title: 'Store Level Payment Drafts — Creation Results' });
         const htmlField = form.addField({
             id   : 'custpage_results',
             type : serverWidget.FieldType.INLINEHTML,
