@@ -32,6 +32,9 @@
  * Chore (2026-04-01e): Trim saved searches to Store Level and Parent Level
  *   only. Remove default selection — require explicit choice before loading.
  *   Prevents fallback-to-Store-Level when Parent Level was selected.
+ * Fix (2026-04-01f): All <button> elements must have type="button" to prevent
+ *   NetSuite's outer form wrapper from treating them as submit buttons, which
+ *   was stripping f_search and other custom URL params on Apply.
  */
 
 define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
@@ -762,17 +765,17 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
       <label>To</label>
       <input id="f-to" type="date" value="${escHtml(filters.to)}">
     </div>
-    <button class="pnd-btn pnd-apply" onclick="applyFilters()">&#128269; Apply</button>
+    <button type="button" class="pnd-btn pnd-apply" onclick="applyFilters()">&#128269; Apply</button>
     <a class="pnd-btn pnd-reset" href="${escHtml(baseUrl)}">&#x21BA; Reset</a>
   </div>
 
   <div class="pnd-toolbar">
     <a id="pnd-export-link" class="pnd-btn pnd-export" href="${escHtml(exportUrl)}">&#11015; Export to CSV</a>
-    <button id="pnd-create-btn" class="pnd-btn pnd-create" onclick="createSelectedPayments()" disabled>
+    <button type="button" id="pnd-create-btn" class="pnd-btn pnd-create" onclick="createSelectedPayments()" disabled>
       &#9654; Create Payment Drafts (0)
     </button>
-    <button class="pnd-btn pnd-mark" onclick="toggleAll(true)">&#9745; Mark All</button>
-    <button class="pnd-btn pnd-mark" onclick="toggleAll(false)">&#9744; Unmark All</button>
+    <button type="button" class="pnd-btn pnd-mark" onclick="toggleAll(true)">&#9745; Mark All</button>
+    <button type="button" class="pnd-btn pnd-mark" onclick="toggleAll(false)">&#9744; Unmark All</button>
     <span class="pnd-count">${countLabel}</span>
     <div class="pnd-pagination">
       ${prevUrl ? `<a class="pg-btn pg-nav" href="${escHtml(prevUrl)}">&lsaquo; Prev</a>` : `<span class="pg-btn pg-nav" style="opacity:.4;cursor:default">&lsaquo; Prev</span>`}
