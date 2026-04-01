@@ -5,9 +5,9 @@
  *
  * Store Level Payment Drafts
  *
- * Replicates saved search customsearch_gtf_prenotif_child_custom_8 with
- * enhancements: first line item lookup, per-row checkboxes, selective export,
- * and direct Customer Payment creation from selected rows.
+ * Driven by a hardcoded list of pre-notification saved searches. The selected
+ * saved search defines the invoice universe; SuiteQL handles column structure,
+ * additional filters, paging, and export.
  *
  * Script ID:    customscript_gtf_sl_prenotif_drafts
  * Deploy ID:    customdeploy_store_level_payment_draft
@@ -20,25 +20,37 @@
  *   Drafts button — creates Customer Payment records via N/record.
  *   Max 200 records per batch (governance safety cap).
  * Chore (2026-03-31e): Page titles renamed to "Store Level Payment Drafts".
- * Fix (2026-04-01):
- *   - Brand/franc filters: BUILTIN.DF() cannot appear in WHERE — dropdown
- *     now stores raw internal IDs as option values; buildFilterWhere compares
- *     c.custentity_gtf_brand and c.parent directly against numeric IDs.
- *   - Export respects row selection: when rows are checked, Export to CSV
- *     appends &ids=... and server fetches only those invoice IDs; when no
- *     rows are checked the full filtered result set is exported as before.
+ * Fix (2026-04-01a): Brand/franc filters use raw IDs (BUILTIN.DF not allowed
+ *   in WHERE). Export respects row selection via &ids= parameter.
+ * Feat (2026-04-01b): Saved search dropdown (hardcoded list, Store Level
+ *   default). N/search.runPaged collects matching invoice IDs; those IDs drive
+ *   all SuiteQL queries so column structure is fully preserved. Additional
+ *   filters (brand, store, etc.) are applied on top of saved search IDs.
  */
 
-define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record'],
-       (query,    log,     serverWidget,          record) => {
+define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
+       (query,    log,     serverWidget,          record,    search) => {
 
     // -------------------------------------------------------------------------
     // Constants
     // -------------------------------------------------------------------------
 
     const PAGE_SIZE  = 100;
-    const BATCH_SIZE = 500;   // max IDs per SuiteQL IN clause / runSuiteQL call
+    const BATCH_SIZE = 500;   // max IDs per SuiteQL IN clause
     const MAX_CREATE = 200;   // governance safety cap for payment creation batch
+
+    /**
+     * Hardcoded saved search list. First entry is the default.
+     * To add a search: append { id: 'customsearch_xxx', label: 'Display Name' }.
+     */
+    const SAVED_SEARCHES = [
+        { id: 'customsearch_gtf_prenotif_child_custom_8',  label: 'Payment Drafts - Store Level' },
+        { id: 'customsearch_gtf_prenotif_child_custom_5',  label: 'Payment Drafts - Parent Level' },
+        { id: 'customsearch_gtf_prenotif_child_custo__2',  label: 'Payment Refunds - Update Bank Details' },
+        { id: 'customsearch_gtf_prenotif_child_custom_9',  label: 'Payment Drafts - Parent Level TEST' },
+        { id: 'customsearch_gtf_prenotif_child_custo_10',  label: 'Payment Drafts - Update Bank Details' }
+    ];
+    const DEFAULT_SEARCH_ID = SAVED_SEARCHES[0].id;
 
     const COLUMNS = [
         'Internal ID',              // 0
@@ -60,6 +72,7 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record'],
         'Undeposited Funds'         // 16
     ];
 
+    // Used for DATA_SELECT queries (columns + joins)
     const BASE_FROM = `
         FROM transaction t
         JOIN transactionline tl ON tl.transaction = t.id
@@ -70,15 +83,14 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record'],
         JOIN account    a   ON a.id   = tl.expenseaccount
     `;
 
-    const BASE_WHERE = `
-        WHERE t.type     = 'CustInvc'
-          AND t.posting  = 'T'
-          AND t.status NOT IN ('B','V','R','C')
-          AND c.custentity_2663_direct_debit      = 'T'
-          AND c.custentity_2663_customer_refund   = 'T'
-          AND c.category                         <> 8
-          AND t.custbody_gtf_trxonhold            = 'F'
-          AND c.custentity_gtf_payment_preference = 2
+    // Used only for getFilteredIds and runDropdownQuery (lighter join set)
+    const LIGHT_FROM = `
+        FROM transaction t
+        JOIN transactionline tl ON tl.transaction = t.id
+                                AND tl.mainline   = 'T'
+                                AND tl.taxline    = 'F'
+        JOIN customer   c   ON c.id   = t.entity
+        JOIN subsidiary sub ON sub.id = tl.subsidiary
     `;
 
     // Payment Note(Memo) is NULL here; fetchFirstLineItems() fills it in JS.
@@ -115,24 +127,35 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record'],
             const scriptId   = params.script  || '';
             const deployId   = params.deploy  || '';
 
+            // Validate saved search selection — fall back to default if invalid
+            const rawSearchId = sanitize(params.f_search || '');
+            const searchId    = SAVED_SEARCHES.some(s => s.id === rawSearchId)
+                                    ? rawSearchId
+                                    : DEFAULT_SEARCH_ID;
+
             const filters = {
-                brand : sanitize(params.f_brand || ''),
-                store : sanitize(params.f_store || ''),
-                franc : sanitize(params.f_franc || ''),
-                week  : sanitize(params.f_week  || ''),
-                from  : sanitize(params.f_from  || ''),
-                to    : sanitize(params.f_to    || '')
+                search: searchId,
+                brand  : sanitize(params.f_brand || ''),
+                store  : sanitize(params.f_store || ''),
+                franc  : sanitize(params.f_franc || ''),
+                week   : sanitize(params.f_week  || ''),
+                from   : sanitize(params.f_from  || ''),
+                to     : sanitize(params.f_to    || '')
             };
 
             const filterWhere = buildFilterWhere(filters);
             const page        = Math.max(1, parseInt(params.page || '1', 10));
 
+            // Run the saved search to get the invoice universe, then filter further
+            const savedIds    = runSavedSearchIds(searchId);
+            const filteredIds = getFilteredIds(savedIds, filterWhere);
+
             if (exportMode) {
-                streamCsv(ctx, filterWhere, params.ids || '');
+                streamCsv(ctx, filteredIds, params.ids || '');
             } else if (createMode) {
                 createPayments(ctx, params.ids || '', scriptId, deployId);
             } else {
-                renderPage(ctx, filters, filterWhere, page, scriptId, deployId);
+                renderPage(ctx, filters, savedIds, filteredIds, page, scriptId, deployId);
             }
 
         } catch (e) {
@@ -148,12 +171,13 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record'],
     // Page renderer
     // -------------------------------------------------------------------------
 
-    const renderPage = (ctx, filters, filterWhere, page, scriptId, deployId) => {
-        const dropdowns  = runDropdownQuery(filterWhere);
-        const total      = runCountQuery(filterWhere);
+    const renderPage = (ctx, filters, savedIds, filteredIds, page, scriptId, deployId) => {
+        // Dropdowns show all options available in the selected saved search
+        const dropdowns  = runDropdownQuery(savedIds);
+        const total      = filteredIds.length;
         const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
         const safePage   = Math.min(page, totalPages);
-        const rows       = runPageQuery(filterWhere, safePage);
+        const rows       = runPageQuery(filteredIds, safePage);
 
         const rawBase = ctx.request.url.split('?')[0];
         const baseUrl = rawBase
@@ -173,15 +197,61 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record'],
     };
 
     // -------------------------------------------------------------------------
-    // Queries — display / export
+    // Saved search + filter queries
     // -------------------------------------------------------------------------
 
     /**
-     * Builds additional WHERE clauses from active filters.
+     * Loads the saved search and returns all matching transaction IDs
+     * as an array of integers. Uses N/search.runPaged to handle large
+     * result sets without hitting the 4,000-row flat run() cap.
+     */
+    const runSavedSearchIds = (searchId) => {
+        const srch  = search.load({ id: searchId });
+        const paged = srch.runPaged({ pageSize: 1000 });
+        const ids   = [];
+        paged.pageRanges.forEach(range => {
+            paged.fetch({ index: range.index }).data.each(result => {
+                ids.push(parseInt(result.id, 10));
+                return true;
+            });
+        });
+        return ids;
+    };
+
+    /**
+     * Filters savedIds by the additional user-applied criteria
+     * (brand, store, franchisee, date range).
      *
-     * Brand and franc are stored as raw internal IDs (integers) in the
-     * dropdown option values — BUILTIN.DF() cannot be used in WHERE clauses
-     * in SuiteQL (it is SELECT-only). Comparing raw IDs directly is correct.
+     * Fast path: if filterWhere is empty, returns savedIds unchanged —
+     * no SuiteQL queries needed.
+     *
+     * Otherwise batches savedIds through LIGHT_FROM + WHERE t.id IN (batch)
+     * + filterWhere to find the matching subset.
+     */
+    const getFilteredIds = (savedIds, filterWhere) => {
+        if (!filterWhere || !savedIds.length) return savedIds.slice();
+        const filteredIds = [];
+        for (let i = 0; i < savedIds.length; i += BATCH_SIZE) {
+            const idList = savedIds.slice(i, i + BATCH_SIZE).join(',');
+            const sql    = `
+                SELECT t.id ${LIGHT_FROM}
+                WHERE t.id IN (${idList}) ${filterWhere}
+                ORDER BY t.id
+            `;
+            const paged  = query.runSuiteQLPaged({ query: sql, pageSize: 1000 });
+            paged.pageRanges.forEach(range => {
+                const pg = paged.fetch({ index: range.index });
+                (pg.data.results || []).forEach(r => filteredIds.push(parseInt(r.values[0], 10)));
+            });
+        }
+        return filteredIds;
+    };
+
+    /**
+     * Builds additional WHERE clauses from active user-selected filters.
+     * Brand and franc use raw internal IDs — BUILTIN.DF() cannot appear
+     * in SuiteQL WHERE clauses (SELECT-only function).
+     * The saved search is handled separately via runSavedSearchIds.
      */
     const buildFilterWhere = (f) => {
         const clauses = [];
@@ -194,61 +264,41 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record'],
         return clauses.length ? ' AND ' + clauses.join(' AND ') : '';
     };
 
-    const LIGHT_FROM = `
-        FROM transaction t
-        JOIN transactionline tl ON tl.transaction = t.id
-                                AND tl.mainline   = 'T'
-                                AND tl.taxline    = 'F'
-        JOIN customer   c   ON c.id   = t.entity
-        JOIN subsidiary sub ON sub.id = tl.subsidiary
-    `;
-
-    const runCountQuery = (filterWhere) => {
-        const sql    = `SELECT t.id ${LIGHT_FROM} ${BASE_WHERE} ${filterWhere} ORDER BY t.id`;
-        const paged  = query.runSuiteQLPaged({ query: sql, pageSize: 1000 });
-        const ranges = paged.pageRanges;
-        if (!ranges || ranges.length === 0) return 0;
-        const lastPage  = paged.fetch({ index: ranges.length - 1 });
-        const lastCount = (lastPage.data.results || []).length;
-        return (ranges.length - 1) * 1000 + lastCount;
-    };
-
     /**
-     * Populates filter dropdowns.
-     *
-     * Brand and franc option values are raw internal IDs so that
-     * buildFilterWhere can compare directly without BUILTIN.DF().
-     * The display label shown to the user is still the human-readable name.
+     * Populates brand, franchisee, and week dropdowns from the full saved
+     * search universe (savedIds — not filtered). Batched in BATCH_SIZE chunks.
+     * Raw internal IDs are used as option values so buildFilterWhere works.
      */
-    const runDropdownQuery = (filterWhere) => {
-        const sql = `
-            SELECT DISTINCT
-                c.custentity_gtf_brand                                             AS brand_id,
-                BUILTIN.DF(c.custentity_gtf_brand)                                 AS brand_name,
-                c.parent                                                            AS franc_id,
-                BUILTIN.DF(c.parent)                                                AS franc_name,
-                NVL(TO_CHAR(t.custbody_gtf_weekenddate, 'MM/DD/YYYY'), '')         AS week_ending
-            ${LIGHT_FROM} ${BASE_WHERE} ${filterWhere}
-            ORDER BY 2, 4, 5
-        `;
-        const paged  = query.runSuiteQLPaged({ query: sql, pageSize: 1000 });
-
-        // Use Maps keyed by ID to deduplicate across pages
+    const runDropdownQuery = (savedIds) => {
         const brandMap = new Map();
         const francMap = new Map();
         const weeks    = new Set();
 
-        paged.pageRanges.forEach(range => {
-            const pg = paged.fetch({ index: range.index });
-            (pg.data.results || []).forEach(row => {
-                const [brandId, brandName, francId, francName, week] = row.values;
-                if (brandId && brandName) brandMap.set(String(brandId), String(brandName));
-                if (francId && francName) francMap.set(String(francId), String(francName));
-                if (week) weeks.add(String(week));
+        for (let i = 0; i < savedIds.length; i += BATCH_SIZE) {
+            const idList = savedIds.slice(i, i + BATCH_SIZE).join(',');
+            const sql    = `
+                SELECT DISTINCT
+                    c.custentity_gtf_brand                                      AS brand_id,
+                    BUILTIN.DF(c.custentity_gtf_brand)                          AS brand_name,
+                    c.parent                                                     AS franc_id,
+                    BUILTIN.DF(c.parent)                                         AS franc_name,
+                    NVL(TO_CHAR(t.custbody_gtf_weekenddate, 'MM/DD/YYYY'), '')  AS week_ending
+                ${LIGHT_FROM}
+                WHERE t.id IN (${idList})
+                ORDER BY 2, 4, 5
+            `;
+            const paged = query.runSuiteQLPaged({ query: sql, pageSize: 1000 });
+            paged.pageRanges.forEach(range => {
+                const pg = paged.fetch({ index: range.index });
+                (pg.data.results || []).forEach(row => {
+                    const [brandId, brandName, francId, francName, week] = row.values;
+                    if (brandId && brandName) brandMap.set(String(brandId), String(brandName));
+                    if (francId && francName) francMap.set(String(francId), String(francName));
+                    if (week) weeks.add(String(week));
+                });
             });
-        });
+        }
 
-        // Sort by display name, preserve id/name pairing
         const sortPairs = (map) =>
             Array.from(map.entries())
                  .map(([id, name]) => ({ id, name }))
@@ -261,12 +311,16 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record'],
         };
     };
 
+    // -------------------------------------------------------------------------
+    // Data queries
+    // -------------------------------------------------------------------------
+
     /**
      * Returns item.itemid for the first non-main, non-tax line of each
      * transaction, falling back to tl.memo for lines without an item.
      * Batched to avoid the 5,000-row runSuiteQL cap.
-     * transactionline.id is a per-transaction sequence number — JOIN back
-     * must include BOTH transaction AND id.
+     * transactionline.id is per-transaction — JOIN back must include BOTH
+     * transaction AND id.
      */
     const fetchFirstLineItems = (txnIds) => {
         if (!txnIds || txnIds.length === 0) return {};
@@ -306,30 +360,25 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record'],
         });
     };
 
-    const runPageQuery = (filterWhere, page) => {
-        const sql        = `${DATA_SELECT} ${BASE_FROM} ${BASE_WHERE} ${filterWhere} ORDER BY sub.externalid, t.trandate, t.id`;
-        const pagedQuery = query.runSuiteQLPaged({ query: sql, pageSize: PAGE_SIZE });
-        const pageIndex  = Math.min(page - 1, pagedQuery.pageRanges.length - 1);
-        if (pageIndex < 0) return [];
-        const pg   = pagedQuery.fetch({ index: pageIndex });
-        const rows = (pg.data.results || []).map(r => r.values);
+    /**
+     * Fetches data for one page. filteredIds is already sorted; slice the
+     * correct page and query only those IDs — no paging needed server-side
+     * since we already know exactly which IDs belong on this page.
+     */
+    const runPageQuery = (filteredIds, page) => {
+        const start   = (page - 1) * PAGE_SIZE;
+        const pageIds = filteredIds.slice(start, start + PAGE_SIZE);
+        if (!pageIds.length) return [];
+        const idList = pageIds.join(',');
+        const sql    = `${DATA_SELECT} ${BASE_FROM} WHERE t.id IN (${idList}) ORDER BY sub.externalid, t.trandate, t.id`;
+        const rs     = query.runSuiteQL({ query: sql });
+        const rows   = (rs.results || []).map(r => r.values);
         return mergeFirstLineItems(rows);
     };
 
-    const runAllRows = (filterWhere) => {
-        const sql        = `${DATA_SELECT} ${BASE_FROM} ${BASE_WHERE} ${filterWhere} ORDER BY sub.externalid, t.trandate, t.id`;
-        const pagedQuery = query.runSuiteQLPaged({ query: sql, pageSize: 1000 });
-        const results    = [];
-        pagedQuery.pageRanges.forEach(range => {
-            const pg = pagedQuery.fetch({ index: range.index });
-            (pg.data.results || []).forEach(r => results.push(r.values));
-        });
-        return mergeFirstLineItems(results);
-    };
-
     /**
-     * Fetches only the specific invoice IDs provided — used when the user
-     * has selected rows and clicks Export to CSV.
+     * Fetches data for a specific list of IDs — used for export and Create.
+     * Batched in BATCH_SIZE chunks to handle large sets.
      */
     const runRowsByIds = (ids) => {
         const results = [];
@@ -413,7 +462,7 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record'],
         if (ids.length > MAX_CREATE) {
             return renderCreateResults(ctx, [], backUrl,
                 `Selection of ${ids.length} exceeds the maximum batch size of ${MAX_CREATE}. ` +
-                `Please refine your filters or select fewer records.`);
+                `Please select fewer records.`);
         }
 
         const rows    = fetchCreateData(ids);
@@ -433,7 +482,6 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record'],
                     isDynamic : true
                 });
 
-                // Set customer first — required so apply sublist auto-populates
                 rec.setValue({ fieldId: 'customer',                  value: parseInt(row.customerId) });
                 rec.setValue({ fieldId: 'subsidiary',                 value: parseInt(row.subsidiaryId) });
                 rec.setValue({ fieldId: 'account',                    value: parseInt(row.bankAccountId) });
@@ -554,15 +602,17 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record'],
 
     const buildHtml = (rows, filters, dropdowns, page, totalPages, total, baseUrl) => {
 
+        // baseUrl already contains ?script=...&deploy=... — append with &
         const buildUrl = (overrides) => {
             const p = Object.assign({
-                f_brand: filters.brand,
-                f_store: filters.store,
-                f_franc: filters.franc,
-                f_week : filters.week,
-                f_from : filters.from,
-                f_to   : filters.to,
-                page   : page
+                f_search: filters.search,
+                f_brand : filters.brand,
+                f_store : filters.store,
+                f_franc : filters.franc,
+                f_week  : filters.week,
+                f_from  : filters.from,
+                f_to    : filters.to,
+                page    : page
             }, overrides);
             const qs = Object.entries(p)
                 .filter(([, v]) => v !== '' && v !== null && v !== undefined)
@@ -571,10 +621,15 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record'],
             return baseUrl + (qs ? '&' + qs : '');
         };
 
-        // Base export URL (all filtered rows) — JS overrides href when rows are selected
+        // Base export URL — JS overrides href to &ids=... when rows are selected
         const exportUrl = buildUrl({ export: '1', page: '' });
 
-        // Brand/franc dropdowns: option value = raw internal ID, label = display name
+        // Saved search options
+        const selOptsSavedSearches = SAVED_SEARCHES.map(s =>
+            `<option value="${escHtml(s.id)}"${s.id === filters.search ? ' selected' : ''}>${escHtml(s.label)}</option>`
+        ).join('');
+
+        // Brand/franc: option value = raw internal ID, label = display name
         const selOptsPairs = (pairs, selectedId) =>
             pairs.map(p => `<option value="${escHtml(p.id)}"${String(p.id) === String(selectedId) ? ' selected' : ''}>${escHtml(p.name)}</option>`).join('');
 
@@ -636,6 +691,7 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record'],
   .pnd-fg select,
   .pnd-fg input[type=text],
   .pnd-fg input[type=date] { font-size: 12px; padding: 4px 6px; border: 1px solid #bbb; border-radius: 3px; min-width: 130px; background:#fff; }
+  .pnd-fg select.pnd-search-sel { min-width: 280px; border-color: #1f5ea8; }
   .pnd-btn { padding: 5px 12px; font-size: 12px; border-radius: 3px; cursor: pointer; text-decoration: none; display: inline-block; border: 1px solid transparent; }
   .pnd-apply  { background: #1f5ea8; color: #fff; border-color: #1f5ea8; }
   .pnd-apply:hover  { background: #174d8c; }
@@ -680,6 +736,12 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record'],
 <div id="pnd-wrap">
 
   <div class="pnd-filters">
+    <div class="pnd-fg">
+      <label>Saved Search</label>
+      <select id="f-search" class="pnd-search-sel">
+        ${selOptsSavedSearches}
+      </select>
+    </div>
     <div class="pnd-fg">
       <label>Brand</label>
       <select id="f-brand">
@@ -745,23 +807,25 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record'],
 <script>
 (function() {
   var baseUrl    = ${JSON.stringify(baseUrl)};
-  var exportBase = ${JSON.stringify(exportUrl)};  // full filtered export URL
+  var exportBase = ${JSON.stringify(exportUrl)};
 
   // ── Filter apply ──────────────────────────────────────────────────────────
   window.applyFilters = function() {
     var params = [];
+    var srch  = document.getElementById('f-search').value;
     var brand = document.getElementById('f-brand').value;
     var store = document.getElementById('f-store').value.trim();
     var franc = document.getElementById('f-franc').value;
     var week  = document.getElementById('f-week').value;
     var from  = document.getElementById('f-from').value;
     var to    = document.getElementById('f-to').value;
-    if (brand) params.push('f_brand=' + encodeURIComponent(brand));
-    if (store) params.push('f_store=' + encodeURIComponent(store));
-    if (franc) params.push('f_franc=' + encodeURIComponent(franc));
-    if (week)  params.push('f_week='  + encodeURIComponent(week));
-    if (from)  params.push('f_from='  + encodeURIComponent(from));
-    if (to)    params.push('f_to='    + encodeURIComponent(to));
+    if (srch)  params.push('f_search=' + encodeURIComponent(srch));
+    if (brand) params.push('f_brand='  + encodeURIComponent(brand));
+    if (store) params.push('f_store='  + encodeURIComponent(store));
+    if (franc) params.push('f_franc='  + encodeURIComponent(franc));
+    if (week)  params.push('f_week='   + encodeURIComponent(week));
+    if (from)  params.push('f_from='   + encodeURIComponent(from));
+    if (to)    params.push('f_to='     + encodeURIComponent(to));
     params.push('page=1');
     window.location.href = baseUrl + (params.length ? '&' + params.join('&') : '');
   };
@@ -774,39 +838,32 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record'],
   function getCheckboxes() { return Array.from(document.querySelectorAll('.pnd-row-cb')); }
   function getChecked()    { return getCheckboxes().filter(function(cb) { return cb.checked; }); }
 
-  /**
-   * Updates the Create button count/state and the Export link href.
-   * When rows are selected, Export downloads only those rows.
-   * When nothing is selected, Export downloads the full filtered result.
-   */
   function updateToolbar() {
     var checked = getChecked();
     var count   = checked.length;
 
-    // Create button
     var btn = document.getElementById('pnd-create-btn');
     btn.textContent = '\u25B6 Create Payment Drafts (' + count + ')';
     btn.disabled    = count === 0;
 
-    // Export link
     var exportLink = document.getElementById('pnd-export-link');
     if (count > 0) {
       var ids = checked.map(function(cb) { return cb.dataset.id; }).join(',');
-      exportLink.href = exportBase + '&ids=' + encodeURIComponent(ids);
+      exportLink.href        = exportBase + '&ids=' + encodeURIComponent(ids);
       exportLink.textContent = '\u2B07 Export Selected (' + count + ')';
     } else {
-      exportLink.href = exportBase;
+      exportLink.href        = exportBase;
       exportLink.textContent = '\u2B07 Export to CSV';
     }
   }
 
   function updateHeaderCheckbox() {
-    var all     = getCheckboxes();
-    var checked = getChecked();
-    var hdr     = document.getElementById('pnd-check-all');
+    var all  = getCheckboxes();
+    var chk  = getChecked();
+    var hdr  = document.getElementById('pnd-check-all');
     if (!hdr) return;
-    hdr.indeterminate = checked.length > 0 && checked.length < all.length;
-    hdr.checked       = all.length > 0 && checked.length === all.length;
+    hdr.indeterminate = chk.length > 0 && chk.length < all.length;
+    hdr.checked       = all.length > 0 && chk.length === all.length;
   }
 
   function onRowCheckChange(cb) {
@@ -868,7 +925,6 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record'],
     form.submit();
   };
 
-  // Init
   updateToolbar();
 })();
 </script>`;
@@ -880,14 +936,14 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record'],
 
     /**
      * Streams a CSV response.
-     * If idsParam is provided (selected rows), exports only those invoice IDs.
-     * Otherwise exports all rows matching the current filters.
+     * If idsParam is provided (selected rows), exports only those IDs.
+     * Otherwise exports all filteredIds (the full filtered result set).
      */
-    const streamCsv = (ctx, filterWhere, idsParam) => {
-        const ids  = (idsParam || '').split(',').map(s => parseInt(s.trim(), 10)).filter(n => n > 0);
-        const rows = ids.length > 0 ? runRowsByIds(ids) : runAllRows(filterWhere);
-        const ts   = formatTimestamp(new Date());
-        const filename = `GTF_PreNotif_PaymentDrafts_${ts}.csv`;
+    const streamCsv = (ctx, filteredIds, idsParam) => {
+        const selectedIds = (idsParam || '').split(',').map(s => parseInt(s.trim(), 10)).filter(n => n > 0);
+        const rows        = selectedIds.length > 0 ? runRowsByIds(selectedIds) : runRowsByIds(filteredIds);
+        const ts          = formatTimestamp(new Date());
+        const filename    = `GTF_PreNotif_PaymentDrafts_${ts}.csv`;
         ctx.response.setHeader({ name: 'Content-Type',        value: 'text/csv; charset=utf-8' });
         ctx.response.setHeader({ name: 'Content-Disposition', value: `attachment; filename="${filename}"` });
         ctx.response.write(buildCsv(rows));
