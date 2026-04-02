@@ -35,11 +35,15 @@
  * Fix (2026-04-01f): All <button> elements must have type="button" to prevent
  *   NetSuite's outer form wrapper from treating them as submit buttons, which
  *   was stripping f_search and other custom URL params on Apply.
- * Feat (2026-04-02): Three EFT detail columns added from
+ * Feat (2026-04-02a): Three EFT detail columns added from
  *   customrecord_2663_entity_bank_details joined on customer ID:
- *   EFT Record Name (name), EFT Type (custrecord_2663_entity_bank_type),
- *   EFT Payment File Format (custrecord_2663_entity_file_format).
- *   Batched lookup via fetchBankDetails() — same pattern as fetchFirstLineItems.
+ *   EFT Record Name, EFT Type, EFT Payment File Format.
+ *   Batched lookup via fetchBankDetails().
+ * Feat (2026-04-02b): EFT Type column moved to display position 5 (before
+ *   Bank Account to Draft) using COLUMN_DATA_INDICES reorder map.
+ *   EFT Type filter dropdown added — uses IN subquery on bank details record
+ *   to filter by Primary (1) or Secondary (2). Filter is hardcoded since
+ *   only two values exist in production.
  */
 
 define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
@@ -62,28 +66,57 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
         { id: 'customsearch_gtf_prenotif_child_custom_5', label: 'Payment Drafts - Parent Level' }
     ];
 
-    const COLUMNS = [
-        'Internal ID',              // 0
-        'Add Payment Number',       // 1
-        'Payment Preference',       // 2
-        'Customer Internal ID',     // 3
-        'Subsidiary External ID',   // 4
-        'Bank Account to Draft',    // 5
-        'Date',                     // 6
-        'Invoice Memo',             // 7
-        'AR Account External ID',   // 8
-        'Payment Note(Memo)',       // 9  ← item.itemid from first line
-        'Bank Account External ID', // 10
-        'GTF Bank Internal ID',     // 11
-        'Currency',                 // 12
-        'Payment Amount',           // 13
-        'Apply to Invoice ID',      // 14
-        'For Electronic Payment',   // 15
-        'Undeposited Funds',        // 16
-        'EFT Record Name',          // 17 ← customrecord_2663_entity_bank_details.name
-        'EFT Type',                 // 18 ← custrecord_2663_entity_bank_type display value
-        'EFT Payment File Format'   // 19 ← custrecord_2663_entity_file_format display value
+    /**
+     * EFT Type filter options. Values are custrecord_2663_entity_bank_type IDs.
+     * Only Primary (1) and Secondary (2) exist in production.
+     */
+    const EFT_TYPES = [
+        { id: '1', name: 'Primary' },
+        { id: '2', name: 'Secondary' }
     ];
+
+    /**
+     * Display column order (what the user sees / what the CSV exports).
+     * The underlying data array has a fixed order driven by DATA_SELECT + JS merges.
+     * COLUMN_DATA_INDICES maps each display position to its data array index.
+     *
+     * Data array layout after all merges:
+     *  [0]  Internal ID            [10] Bank Account External ID
+     *  [1]  Add Payment Number     [11] GTF Bank Internal ID
+     *  [2]  Payment Preference     [12] Currency
+     *  [3]  Customer Internal ID   [13] Payment Amount
+     *  [4]  Subsidiary External ID [14] Apply to Invoice ID
+     *  [5]  Bank Account to Draft  [15] For Electronic Payment
+     *  [6]  Date                   [16] Undeposited Funds
+     *  [7]  Invoice Memo           [17] EFT Record Name      (JS merge)
+     *  [8]  AR Account External ID [18] EFT Type             (JS merge)
+     *  [9]  Payment Note(Memo)     [19] EFT Payment File Fmt (JS merge)
+     */
+    const COLUMNS = [
+        'Internal ID',              // display 0  → data[0]
+        'Add Payment Number',       // display 1  → data[1]
+        'Payment Preference',       // display 2  → data[2]
+        'Customer Internal ID',     // display 3  → data[3]
+        'Subsidiary External ID',   // display 4  → data[4]
+        'EFT Type',                 // display 5  → data[18] ← moved before Bank Account
+        'Bank Account to Draft',    // display 6  → data[5]
+        'Date',                     // display 7  → data[6]
+        'Invoice Memo',             // display 8  → data[7]
+        'AR Account External ID',   // display 9  → data[8]
+        'Payment Note(Memo)',       // display 10 → data[9]
+        'Bank Account External ID', // display 11 → data[10]
+        'GTF Bank Internal ID',     // display 12 → data[11]
+        'Currency',                 // display 13 → data[12]
+        'Payment Amount',           // display 14 → data[13]
+        'Apply to Invoice ID',      // display 15 → data[14]
+        'For Electronic Payment',   // display 16 → data[15]
+        'Undeposited Funds',        // display 17 → data[16]
+        'EFT Record Name',          // display 18 → data[17]
+        'EFT Payment File Format'   // display 19 → data[19]
+    ];
+
+    // Maps each COLUMNS display position to its data array index.
+    const COLUMN_DATA_INDICES = [0, 1, 2, 3, 4, 18, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 19];
 
     // Used for DATA_SELECT queries (columns + joins)
     const BASE_FROM = `
@@ -106,8 +139,9 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
         JOIN subsidiary sub ON sub.id = tl.subsidiary
     `;
 
-    // Payment Note(Memo) is NULL here; fetchFirstLineItems() fills it in JS.
-    // EFT columns (17-19) are also NULL here; fetchBankDetails() fills them.
+    // Returns 17 columns (data indices 0-16).
+    // Index 9 (Payment Note/Memo) is NULL — mergeFirstLineItems() fills it.
+    // Indices 17-19 (EFT fields) are appended by mergeBankDetails().
     const DATA_SELECT = `
         SELECT
             t.id                                                                AS "Internal ID",
@@ -149,13 +183,14 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
                                     : '';
 
             const filters = {
-                search: searchId,
-                brand  : sanitize(params.f_brand || ''),
-                store  : sanitize(params.f_store || ''),
-                franc  : sanitize(params.f_franc || ''),
-                week   : sanitize(params.f_week  || ''),
-                from   : sanitize(params.f_from  || ''),
-                to     : sanitize(params.f_to    || '')
+                search  : searchId,
+                brand   : sanitize(params.f_brand    || ''),
+                store   : sanitize(params.f_store    || ''),
+                franc   : sanitize(params.f_franc    || ''),
+                week    : sanitize(params.f_week     || ''),
+                from    : sanitize(params.f_from     || ''),
+                to      : sanitize(params.f_to       || ''),
+                eft_type: sanitize(params.f_eft_type || '')
             };
 
             const filterWhere = buildFilterWhere(filters);
@@ -188,7 +223,6 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
     // -------------------------------------------------------------------------
 
     const renderPage = (ctx, filters, savedIds, filteredIds, page, scriptId, deployId) => {
-        // Dropdowns show all options available in the selected saved search
         const dropdowns  = runDropdownQuery(savedIds);
         const total      = filteredIds.length;
         const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
@@ -217,13 +251,8 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
     // -------------------------------------------------------------------------
 
     /**
-     * Loads the saved search and returns all matching transaction IDs
-     * as an array of integers. Uses N/search.runPaged to handle large
-     * result sets without hitting the 4,000-row flat run() cap.
-     *
-     * In Suitelet context, page.data is a plain array of Result objects —
-     * neither .each() nor .results are available. Use (page.data || []).forEach().
-     * Only called when searchId is non-empty.
+     * Loads the saved search and returns all matching transaction IDs.
+     * In Suitelet context, page.data is a plain array — use (page.data || []).forEach().
      */
     const runSavedSearchIds = (searchId) => {
         const srch  = search.load({ id: searchId });
@@ -231,7 +260,6 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
         const ids   = [];
         paged.pageRanges.forEach(range => {
             const page = paged.fetch({ index: range.index });
-            // page.data is a plain array of Result objects in Suitelet context
             (page.data || []).forEach(result => {
                 ids.push(parseInt(result.id, 10));
             });
@@ -240,11 +268,7 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
     };
 
     /**
-     * Filters savedIds by the additional user-applied criteria
-     * (brand, store, franchisee, date range).
-     *
-     * Fast path: if filterWhere is empty, returns savedIds unchanged —
-     * no SuiteQL queries needed.
+     * Filters savedIds by user-applied criteria. Fast-paths when no filters active.
      */
     const getFilteredIds = (savedIds, filterWhere) => {
         if (!filterWhere || !savedIds.length) return savedIds.slice();
@@ -266,9 +290,11 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
     };
 
     /**
-     * Builds additional WHERE clauses from active user-selected filters.
-     * Brand and franc use raw internal IDs — BUILTIN.DF() cannot appear
-     * in SuiteQL WHERE clauses (SELECT-only function).
+     * Builds WHERE clauses from user-selected filters.
+     *
+     * BUILTIN.DF() cannot appear in WHERE — brand/franc use raw IDs.
+     * eft_type uses an IN subquery against customrecord_2663_entity_bank_details
+     * to filter customers by Primary (1) or Secondary (2) bank detail type.
      */
     const buildFilterWhere = (f) => {
         const clauses = [];
@@ -278,12 +304,19 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
         if (f.week)  clauses.push(`TO_CHAR(t.custbody_gtf_weekenddate, 'MM/DD/YYYY') = '${f.week}'`);
         if (f.from)  clauses.push(`t.trandate >= TO_DATE('${f.from}', 'YYYY-MM-DD')`);
         if (f.to)    clauses.push(`t.trandate <= TO_DATE('${f.to}', 'YYYY-MM-DD')`);
+        if (f.eft_type) clauses.push(
+            `c.id IN (
+                SELECT ebd2.custrecord_2663_parent_cust_ref
+                FROM customrecord_2663_entity_bank_details ebd2
+                WHERE ebd2.custrecord_2663_entity_bank_type = ${parseInt(f.eft_type)}
+                  AND ebd2.isinactive = 'F'
+            )`
+        );
         return clauses.length ? ' AND ' + clauses.join(' AND ') : '';
     };
 
     /**
-     * Populates brand, franchisee, and week dropdowns from the full saved
-     * search universe (savedIds). Batched in BATCH_SIZE chunks.
+     * Populates brand, franchisee, and week dropdowns from the saved search universe.
      */
     const runDropdownQuery = (savedIds) => {
         const brandMap = new Map();
@@ -332,10 +365,8 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
     // -------------------------------------------------------------------------
 
     /**
-     * Returns item.itemid for the first non-main, non-tax line of each
-     * transaction, falling back to tl.memo. Batched in BATCH_SIZE chunks.
-     * transactionline.id is per-transaction — JOIN back must include BOTH
-     * transaction AND id.
+     * Returns item.itemid for the first non-main, non-tax line of each transaction.
+     * Sets data index 9 (Payment Note/Memo). Batched in BATCH_SIZE chunks.
      */
     const fetchFirstLineItems = (txnIds) => {
         if (!txnIds || txnIds.length === 0) return {};
@@ -376,11 +407,9 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
     };
 
     /**
-     * Returns EFT bank detail fields for each customer from
-     * customrecord_2663_entity_bank_details, joined on custrecord_2663_parent_cust_ref.
-     * Only active records are included. Returns a map keyed by customer ID with
-     * { name, type, format } for columns 17, 18, 19 respectively.
-     * Batched in BATCH_SIZE chunks to avoid the 5,000-row runSuiteQL cap.
+     * Returns EFT bank detail fields from customrecord_2663_entity_bank_details.
+     * Sets data indices 17 (EFT Record Name), 18 (EFT Type), 19 (EFT Payment File Format).
+     * First active record per customer wins. Batched in BATCH_SIZE chunks.
      */
     const fetchBankDetails = (customerIds) => {
         if (!customerIds || customerIds.length === 0) return {};
@@ -401,7 +430,6 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
             const rs = query.runSuiteQL({ query: sql });
             (rs.results || []).forEach(row => {
                 const custId = String(row.values[0]);
-                // First active record per customer wins (ORDER BY id picks earliest)
                 if (!map[custId]) {
                     map[custId] = {
                         name  : row.values[1] || '',
@@ -415,7 +443,7 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
     };
 
     const mergeBankDetails = (rows) => {
-        // Customer Internal ID is at index 3
+        // Customer Internal ID is at data index 3
         const customerIds = rows.map(r => r[3]).filter(Boolean);
         const map         = fetchBankDetails(customerIds);
         return rows.map(r => {
@@ -428,6 +456,12 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
         });
     };
 
+    /**
+     * Reorders a 20-element data array to match the COLUMNS display order
+     * defined by COLUMN_DATA_INDICES. Applied after all merges.
+     */
+    const reorderRow = (row) => COLUMN_DATA_INDICES.map(i => (row[i] !== undefined ? row[i] : ''));
+
     const runPageQuery = (filteredIds, page) => {
         const start   = (page - 1) * PAGE_SIZE;
         const pageIds = filteredIds.slice(start, start + PAGE_SIZE);
@@ -436,7 +470,7 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
         const sql    = `${DATA_SELECT} ${BASE_FROM} WHERE t.id IN (${idList}) ORDER BY sub.externalid, t.trandate, t.id`;
         const rs     = query.runSuiteQL({ query: sql });
         const rows   = (rs.results || []).map(r => r.values);
-        return mergeBankDetails(mergeFirstLineItems(rows));
+        return mergeBankDetails(mergeFirstLineItems(rows)).map(reorderRow);
     };
 
     const runRowsByIds = (ids) => {
@@ -447,7 +481,7 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
             const rs     = query.runSuiteQL({ query: sql });
             (rs.results || []).forEach(r => results.push(r.values));
         }
-        return mergeBankDetails(mergeFirstLineItems(results));
+        return mergeBankDetails(mergeFirstLineItems(results)).map(reorderRow);
     };
 
     // -------------------------------------------------------------------------
@@ -663,14 +697,15 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
 
         const buildUrl = (overrides) => {
             const p = Object.assign({
-                f_search: filters.search,
-                f_brand : filters.brand,
-                f_store : filters.store,
-                f_franc : filters.franc,
-                f_week  : filters.week,
-                f_from  : filters.from,
-                f_to    : filters.to,
-                page    : page
+                f_search  : filters.search,
+                f_brand   : filters.brand,
+                f_store   : filters.store,
+                f_franc   : filters.franc,
+                f_week    : filters.week,
+                f_from    : filters.from,
+                f_to      : filters.to,
+                f_eft_type: filters.eft_type,
+                page      : page
             }, overrides);
             const qs = Object.entries(p)
                 .filter(([, v]) => v !== '' && v !== null && v !== undefined)
@@ -694,12 +729,16 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
         const selOptsWeeks = (values, selected) =>
             values.map(v => `<option value="${escHtml(v)}"${v === selected ? ' selected' : ''}>${escHtml(v)}</option>`).join('');
 
+        const selOptsEftType =
+            EFT_TYPES.map(t => `<option value="${escHtml(t.id)}"${t.id === filters.eft_type ? ' selected' : ''}>${escHtml(t.name)}</option>`).join('');
+
         const thCells = `<th style="width:32px;text-align:center">
                             <input type="checkbox" id="pnd-check-all" title="Select / deselect all on this page">
                          </th>`
                        + COLUMNS.map(c => `<th>${escHtml(c)}</th>`).join('');
 
         const trRows = rows.map(row => {
+            // After reorderRow, display[0] = Internal ID
             const id       = row[0] == null ? '' : String(row[0]);
             const drillUrl = id ? `/app/accounting/transactions/custinvc.nl?id=${encodeURIComponent(id)}` : '';
             const cbCell   = `<td style="text-align:center"><input type="checkbox" class="pnd-row-cb" data-id="${escHtml(id)}"></td>`;
@@ -801,6 +840,13 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
       </select>
     </div>
     <div class="pnd-fg">
+      <label>EFT Type</label>
+      <select id="f-eft-type">
+        <option value="">- All -</option>
+        ${selOptsEftType}
+      </select>
+    </div>
+    <div class="pnd-fg">
       <label>Brand</label>
       <select id="f-brand">
         <option value="">- All -</option>
@@ -869,20 +915,22 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
 
   window.applyFilters = function() {
     var params = [];
-    var srch  = document.getElementById('f-search').value;
-    var brand = document.getElementById('f-brand').value;
-    var store = document.getElementById('f-store').value.trim();
-    var franc = document.getElementById('f-franc').value;
-    var week  = document.getElementById('f-week').value;
-    var from  = document.getElementById('f-from').value;
-    var to    = document.getElementById('f-to').value;
-    if (srch)  params.push('f_search=' + encodeURIComponent(srch));
-    if (brand) params.push('f_brand='  + encodeURIComponent(brand));
-    if (store) params.push('f_store='  + encodeURIComponent(store));
-    if (franc) params.push('f_franc='  + encodeURIComponent(franc));
-    if (week)  params.push('f_week='   + encodeURIComponent(week));
-    if (from)  params.push('f_from='   + encodeURIComponent(from));
-    if (to)    params.push('f_to='     + encodeURIComponent(to));
+    var srch     = document.getElementById('f-search').value;
+    var eftType  = document.getElementById('f-eft-type').value;
+    var brand    = document.getElementById('f-brand').value;
+    var store    = document.getElementById('f-store').value.trim();
+    var franc    = document.getElementById('f-franc').value;
+    var week     = document.getElementById('f-week').value;
+    var from     = document.getElementById('f-from').value;
+    var to       = document.getElementById('f-to').value;
+    if (srch)    params.push('f_search='   + encodeURIComponent(srch));
+    if (eftType) params.push('f_eft_type=' + encodeURIComponent(eftType));
+    if (brand)   params.push('f_brand='    + encodeURIComponent(brand));
+    if (store)   params.push('f_store='    + encodeURIComponent(store));
+    if (franc)   params.push('f_franc='    + encodeURIComponent(franc));
+    if (week)    params.push('f_week='     + encodeURIComponent(week));
+    if (from)    params.push('f_from='     + encodeURIComponent(from));
+    if (to)      params.push('f_to='       + encodeURIComponent(to));
     params.push('page=1');
     window.location.href = baseUrl + (params.length ? '&' + params.join('&') : '');
   };
