@@ -21,7 +21,9 @@
  * Fix (2026-04-02f): Mark All / Unmark All buttons select/deselect ALL records
  *   across all pages. Full filteredIds injected server-side as allFilteredIds.
  *   Header checkbox is PAGE-SCOPED only — does not trigger all-pages mode.
- *   Individual row interaction also exits all-pages mode.
+ * Fix (2026-04-02g): \n inside template literal string literals caused a JS
+ *   syntax error that broke all buttons. Changed to \\n so the output HTML
+ *   contains the correct backslash-n escape sequence.
  */
 
 define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
@@ -496,7 +498,6 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
 
 <div id="pnd-wrap">
 
-  <!-- Banner shown when all records across all pages are selected -->
   <div id="pnd-all-pages-banner">
     <span id="pnd-all-pages-msg"></span>
     <button type="button" onclick="toggleAll(false)">Clear selection</button>
@@ -545,8 +546,6 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
 (function() {
   var baseUrl        = ${JSON.stringify(baseUrl)};
   var exportBase     = ${JSON.stringify(exportUrl)};
-  // Full filtered ID list across all pages — injected server-side at render time.
-  // Used by Mark All / Unmark All to operate across all pages.
   var allFilteredIds   = ${JSON.stringify(filteredIds)};
   var allPagesSelected = false;
 
@@ -598,7 +597,6 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
     }
   }
 
-  // Reflects current PAGE state only — not tied to allPagesSelected
   function updateHeaderCheckbox() {
     var all=getCheckboxes(), chk=getChecked(), hdr=document.getElementById('pnd-check-all');
     if (!hdr) return;
@@ -606,7 +604,6 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
     hdr.checked = all.length > 0 && chk.length === all.length;
   }
 
-  // Individual row interaction — exits all-pages mode
   function onRowCheckChange(cb) {
     if (allPagesSelected) {
       allPagesSelected = false;
@@ -622,7 +619,6 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
     cb.addEventListener('change', function(){onRowCheckChange(cb);});
   });
 
-  // Header checkbox is PAGE-SCOPED only — does not trigger all-pages selection
   var hdrCb = document.getElementById('pnd-check-all');
   if (hdrCb) {
     hdrCb.addEventListener('change', function() {
@@ -640,7 +636,6 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
     });
   }
 
-  // Mark All / Unmark All buttons — ALL pages, not just the visible page
   window.toggleAll = function(checked) {
     allPagesSelected = checked;
     getCheckboxes().forEach(function(cb) {
@@ -657,10 +652,10 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
     var count = allPagesSelected ? allFilteredIds.length : getChecked().length;
     if (!count) { alert('No records selected.'); return; }
     if (count > ${MAX_CREATE}) {
-      alert('Maximum ${MAX_CREATE} records per batch. ' + count + ' are selected.\nNarrow your filters or select fewer records.');
+      alert('Maximum ${MAX_CREATE} records per batch. ' + count + ' are selected.\\nNarrow your filters or select fewer records.');
       return;
     }
-    if (!confirm('Create ' + count + ' Customer Payment record' + (count !== 1 ? 's' : '') + '?\nThis cannot be undone.')) return;
+    if (!confirm('Create ' + count + ' Customer Payment record' + (count !== 1 ? 's' : '') + '?\\nThis cannot be undone.')) return;
 
     var f  = document.createElement('form');
     f.method = 'POST'; f.action = baseUrl + '&action=create';
