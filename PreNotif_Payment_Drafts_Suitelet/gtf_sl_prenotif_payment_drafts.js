@@ -15,10 +15,14 @@
  * Feat (2026-04-02b): EFT Type moved to display col 5 via COLUMN_DATA_INDICES.
  * Feat (2026-04-02c): EFT Type cell = inline per-row dropdown; ebd_ids POSTed
  *   with payment creation. Column 0 renamed "Invoice Internal ID".
- * Chore (2026-04-02d): Removed EFT Type and Store Number filter controls from
- *   the filter bar — EFT type selection is handled per-row via inline dropdown.
- * Chore (2026-04-02e): Filter bar — Master Franchisee renamed to Subsidiary
- *   (now filters on sub.id); Week Ending Date filter removed.
+ * Chore (2026-04-02d): Removed EFT Type and Store Number filter controls.
+ * Chore (2026-04-02e): Master Franchisee → Subsidiary filter (sub.id);
+ *   Week Ending Date filter removed.
+ * Fix (2026-04-02f): Mark All now selects all records across all pages, not
+ *   just the current page. Full filteredIds array injected server-side as
+ *   allFilteredIds. allPagesSelected flag drives toolbar counts and submission.
+ *   Blue info banner shown when multi-page selection is active.
+ *   Individual row interaction exits all-pages mode.
  */
 
 define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
@@ -163,7 +167,7 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
 
         const form = serverWidget.createForm({ title: 'Payment Drafts' });
         const htmlField = form.addField({ id: 'custpage_results', type: serverWidget.FieldType.INLINEHTML, label: ' ' });
-        htmlField.defaultValue = buildHtml(rows, filters, dropdowns, safePage, totalPages, total, baseUrl);
+        htmlField.defaultValue = buildHtml(rows, filters, dropdowns, safePage, totalPages, total, baseUrl, filteredIds);
         ctx.response.writePage(form);
     };
 
@@ -421,7 +425,7 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
     // HTML builder
     // -------------------------------------------------------------------------
 
-    const buildHtml = (rows, filters, dropdowns, page, totalPages, total, baseUrl) => {
+    const buildHtml = (rows, filters, dropdowns, page, totalPages, total, baseUrl, filteredIds) => {
         const buildUrl = (overrides) => {
             const p = Object.assign({f_search:filters.search,f_brand:filters.brand,f_subsidiary:filters.subsidiary,f_from:filters.from,f_to:filters.to,page},overrides);
             const qs = Object.entries(p).filter(([,v])=>v!==''&&v!==null&&v!==undefined).map(([k,v])=>encodeURIComponent(k)+'='+encodeURIComponent(v)).join('&');
@@ -484,9 +488,25 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
   #pnd-check-all,.pnd-row-cb { cursor:pointer;width:14px;height:14px; }
   .pnd-no-results { padding:20px;color:#888;text-align:center; }
   .pnd-eft-sel { min-width:80px; }
+  #pnd-all-pages-banner {
+    display:none; align-items:center; gap:10px;
+    background:#e8f0fe; border:1px solid #1f5ea8; border-radius:4px;
+    padding:7px 12px; margin-bottom:8px; font-size:12px; color:#1f5ea8;
+  }
+  #pnd-all-pages-banner button {
+    background:none; border:none; color:#1f5ea8; cursor:pointer;
+    font-size:11px; text-decoration:underline; padding:0;
+  }
 </style>
 
 <div id="pnd-wrap">
+
+  <!-- Banner shown when all records across all pages are selected -->
+  <div id="pnd-all-pages-banner">
+    <span id="pnd-all-pages-msg"></span>
+    <button type="button" onclick="toggleAll(false)">Clear selection</button>
+  </div>
+
   <div class="pnd-filters">
     <div class="pnd-fg">
       <label>Saved Search</label>
@@ -528,8 +548,11 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
 
 <script>
 (function() {
-  var baseUrl    = ${JSON.stringify(baseUrl)};
-  var exportBase = ${JSON.stringify(exportUrl)};
+  var baseUrl        = ${JSON.stringify(baseUrl)};
+  var exportBase     = ${JSON.stringify(exportUrl)};
+  // Full filtered ID list across all pages — injected server-side.
+  var allFilteredIds   = ${JSON.stringify(filteredIds)};
+  var allPagesSelected = false;
 
   window.applyFilters = function() {
     var params = [];
@@ -550,45 +573,114 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
   function getCheckboxes() { return Array.from(document.querySelectorAll('.pnd-row-cb')); }
   function getChecked()    { return getCheckboxes().filter(function(cb){return cb.checked;}); }
 
+  function setAllPagesBanner(visible) {
+    var banner = document.getElementById('pnd-all-pages-banner');
+    if (!banner) return;
+    banner.style.display = visible ? 'flex' : 'none';
+    if (visible) {
+      var msg = document.getElementById('pnd-all-pages-msg');
+      if (msg) msg.textContent = 'All ' + allFilteredIds.length + ' records across all pages are selected.';
+    }
+  }
+
   function updateToolbar() {
-    var checked=getChecked(), count=checked.length;
-    var btn=document.getElementById('pnd-create-btn');
-    btn.textContent='\u25B6 Create Payment Drafts ('+count+')';
-    btn.disabled=count===0;
-    var el=document.getElementById('pnd-export-link');
-    if (count>0){var ids=checked.map(function(cb){return cb.dataset.id;}).join(',');el.href=exportBase+'&ids='+encodeURIComponent(ids);el.textContent='\u2B07 Export Selected ('+count+')';}
-    else{el.href=exportBase;el.textContent='\u2B07 Export to CSV';}
+    var count = allPagesSelected ? allFilteredIds.length : getChecked().length;
+    var btn = document.getElementById('pnd-create-btn');
+    btn.textContent = '\u25B6 Create Payment Drafts (' + count + ')';
+    btn.disabled = count === 0;
+    var el = document.getElementById('pnd-export-link');
+    if (allPagesSelected) {
+      el.href = exportBase;
+      el.textContent = '\u2B07 Export All (' + count + ')';
+    } else if (count > 0) {
+      var ids = getChecked().map(function(cb){return cb.dataset.id;}).join(',');
+      el.href = exportBase + '&ids=' + encodeURIComponent(ids);
+      el.textContent = '\u2B07 Export Selected (' + count + ')';
+    } else {
+      el.href = exportBase;
+      el.textContent = '\u2B07 Export to CSV';
+    }
   }
 
   function updateHeaderCheckbox() {
-    var all=getCheckboxes(),chk=getChecked(),hdr=document.getElementById('pnd-check-all');
-    if(!hdr)return;hdr.indeterminate=chk.length>0&&chk.length<all.length;hdr.checked=all.length>0&&chk.length===all.length;
+    var all=getCheckboxes(), chk=getChecked(), hdr=document.getElementById('pnd-check-all');
+    if (!hdr) return;
+    hdr.indeterminate = !allPagesSelected && chk.length > 0 && chk.length < all.length;
+    hdr.checked = allPagesSelected || (all.length > 0 && chk.length === all.length);
   }
 
-  function onRowCheckChange(cb){var row=cb.closest('tr');if(row)row.classList.toggle('pnd-selected',cb.checked);updateHeaderCheckbox();updateToolbar();}
+  // Individual row interaction — exits all-pages mode
+  function onRowCheckChange(cb) {
+    if (allPagesSelected) {
+      allPagesSelected = false;
+      setAllPagesBanner(false);
+    }
+    var row = cb.closest('tr');
+    if (row) row.classList.toggle('pnd-selected', cb.checked);
+    updateHeaderCheckbox();
+    updateToolbar();
+  }
 
-  getCheckboxes().forEach(function(cb){cb.addEventListener('change',function(){onRowCheckChange(cb);});});
+  getCheckboxes().forEach(function(cb){
+    cb.addEventListener('change', function(){onRowCheckChange(cb);});
+  });
 
-  var hdrCb=document.getElementById('pnd-check-all');
-  if(hdrCb){hdrCb.addEventListener('change',function(){getCheckboxes().forEach(function(cb){cb.checked=hdrCb.checked;var row=cb.closest('tr');if(row)row.classList.toggle('pnd-selected',cb.checked);});updateToolbar();});}
-
-  window.toggleAll=function(checked){getCheckboxes().forEach(function(cb){cb.checked=checked;var row=cb.closest('tr');if(row)row.classList.toggle('pnd-selected',checked);});updateHeaderCheckbox();updateToolbar();};
-
-  window.createSelectedPayments=function(){
-    var checked=getChecked();
-    if(!checked.length){alert('No records selected.');return;}
-    if(checked.length>${MAX_CREATE}){alert('Maximum ${MAX_CREATE} records per batch. Currently selected: '+checked.length+'.');return;}
-    if(!confirm('Create '+checked.length+' Customer Payment record'+(checked.length!==1?'s':'')+' ?\nThis cannot be undone.')) return;
-    var ids=[],ebdIds=[];
-    checked.forEach(function(cb){
-      ids.push(cb.dataset.id);
-      var row=cb.closest('tr'),sel=row?row.querySelector('.pnd-eft-sel'):null,selVal=sel?sel.value:'1';
-      ebdIds.push(selVal==='2'&&cb.dataset.secondaryEbd?cb.dataset.secondaryEbd:cb.dataset.primaryEbd||'');
+  var hdrCb = document.getElementById('pnd-check-all');
+  if (hdrCb) {
+    hdrCb.addEventListener('change', function() {
+      toggleAll(hdrCb.checked);
     });
-    var f=document.createElement('form');f.method='POST';f.action=baseUrl+'&action=create';
-    var i1=document.createElement('input');i1.type='hidden';i1.name='ids';i1.value=ids.join(',');
-    var i2=document.createElement('input');i2.type='hidden';i2.name='ebd_ids';i2.value=ebdIds.join(',');
-    f.appendChild(i1);f.appendChild(i2);document.body.appendChild(f);f.submit();
+  }
+
+  // Mark All / Unmark All — operates across ALL pages, not just the visible page.
+  window.toggleAll = function(checked) {
+    allPagesSelected = checked;
+    getCheckboxes().forEach(function(cb) {
+      cb.checked = checked;
+      var row = cb.closest('tr');
+      if (row) row.classList.toggle('pnd-selected', checked);
+    });
+    // Show banner only when all-pages mode is active and results span multiple pages
+    setAllPagesBanner(checked && allFilteredIds.length > getCheckboxes().length);
+    updateHeaderCheckbox();
+    updateToolbar();
+  };
+
+  window.createSelectedPayments = function() {
+    var count = allPagesSelected ? allFilteredIds.length : getChecked().length;
+    if (!count) { alert('No records selected.'); return; }
+    if (count > ${MAX_CREATE}) {
+      alert('Maximum ${MAX_CREATE} records per batch. ' + count + ' are selected.\nNarrow your filters or select fewer records.');
+      return;
+    }
+    if (!confirm('Create ' + count + ' Customer Payment record' + (count !== 1 ? 's' : '') + '?\nThis cannot be undone.')) return;
+
+    var f  = document.createElement('form');
+    f.method = 'POST'; f.action = baseUrl + '&action=create';
+    var i1 = document.createElement('input');
+    i1.type = 'hidden'; i1.name = 'ids';
+    var i2 = document.createElement('input');
+    i2.type = 'hidden'; i2.name = 'ebd_ids';
+
+    if (allPagesSelected) {
+      // All pages — use full filtered list; EFT type defaults to Primary for all
+      i1.value = allFilteredIds.join(',');
+      i2.value = '';
+    } else {
+      // Per-page — use checked rows with per-row EFT dropdown values
+      var ids = [], ebdIds = [];
+      getChecked().forEach(function(cb) {
+        ids.push(cb.dataset.id);
+        var row = cb.closest('tr'), sel = row ? row.querySelector('.pnd-eft-sel') : null;
+        var selVal = sel ? sel.value : '1';
+        ebdIds.push(selVal === '2' && cb.dataset.secondaryEbd ? cb.dataset.secondaryEbd : cb.dataset.primaryEbd || '');
+      });
+      i1.value = ids.join(',');
+      i2.value = ebdIds.join(',');
+    }
+
+    f.appendChild(i1); f.appendChild(i2);
+    document.body.appendChild(f); f.submit();
   };
 
   updateToolbar();
