@@ -38,17 +38,21 @@
  * Feat (2026-04-02a): Three EFT detail columns added from
  *   customrecord_2663_entity_bank_details joined on customer ID:
  *   EFT Record Name, EFT Type, EFT Payment File Format.
- *   Batched lookup via fetchBankDetails().
+ *   fetchBankDetails() now fetches both Primary (type 1) and Secondary (type 2)
+ *   records per customer. Indices 17-21 in raw data array:
+ *     [17] EFT Record Name (primary)
+ *     [18] EFT Type display text (primary, used for CSV)
+ *     [19] EFT Payment File Format (primary)
+ *     [20] Primary EBD internal ID  (extra, not in COLUMNS — for payment creation)
+ *     [21] Secondary EBD internal ID (extra, not in COLUMNS — '' if none)
  * Feat (2026-04-02b): EFT Type column moved to display position 5 (before
  *   Bank Account to Draft) using COLUMN_DATA_INDICES reorder map.
- *   EFT Type filter dropdown added — uses IN subquery on bank details record
- *   to filter by Primary (1) or Secondary (2).
- * Feat (2026-04-02c): "Change EFT Type" toolbar button added. Selecting rows
- *   and clicking the button opens an inline prompt to choose Primary or
- *   Secondary. On confirm, POSTs action=changeefttype with selected invoice IDs
- *   and new_eft_type. Server resolves the first active bank detail record per
- *   customer and updates custrecord_2663_entity_bank_type via record.load/save.
- *   Results page mirrors the payment creation results pattern.
+ *   EFT Type filter dropdown added — uses IN subquery on bank details record.
+ * Feat (2026-04-02c): EFT Type cell in each table row is an inline <select>
+ *   dropdown defaulting to Primary. Shows Secondary option only when the
+ *   customer has an active Secondary bank detail record. When "Create Payment
+ *   Drafts" fires, the selected EBD ID per row is POSTed as ebd_ids (parallel
+ *   to ids). Column 0 renamed from "Internal ID" to "Invoice Internal ID".
  */
 
 define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
@@ -61,7 +65,6 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
     const PAGE_SIZE  = 100;
     const BATCH_SIZE = 500;   // max IDs per SuiteQL IN clause
     const MAX_CREATE = 200;   // governance safety cap for payment creation batch
-    const MAX_EFT_CHANGE = 200; // governance safety cap for EFT type changes
 
     const SAVED_SEARCHES = [
         { id: 'customsearch_gtf_prenotif_child_custom_8', label: 'Payment Drafts - Store Level' },
@@ -75,25 +78,30 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
     ];
 
     /**
-     * Display column order. Data array layout after all merges:
-     *  [0]  Internal ID            [10] Bank Account External ID
-     *  [1]  Add Payment Number     [11] GTF Bank Internal ID
-     *  [2]  Payment Preference     [12] Currency
-     *  [3]  Customer Internal ID   [13] Payment Amount
-     *  [4]  Subsidiary External ID [14] Apply to Invoice ID
-     *  [5]  Bank Account to Draft  [15] For Electronic Payment
-     *  [6]  Date                   [16] Undeposited Funds
-     *  [7]  Invoice Memo           [17] EFT Record Name      (JS merge)
-     *  [8]  AR Account External ID [18] EFT Type             (JS merge)
-     *  [9]  Payment Note(Memo)     [19] EFT Payment File Fmt (JS merge)
+     * Display column order. Raw data array layout after all merges (22 elements):
+     *  [0]  Invoice Internal ID     [11] GTF Bank Internal ID
+     *  [1]  Add Payment Number      [12] Currency
+     *  [2]  Payment Preference      [13] Payment Amount
+     *  [3]  Customer Internal ID    [14] Apply to Invoice ID
+     *  [4]  Subsidiary External ID  [15] For Electronic Payment
+     *  [5]  Bank Account to Draft   [16] Undeposited Funds
+     *  [6]  Date                    [17] EFT Record Name      (JS merge — primary)
+     *  [7]  Invoice Memo            [18] EFT Type display     (JS merge — primary, for CSV)
+     *  [8]  AR Account External ID  [19] EFT Payment File Fmt (JS merge — primary)
+     *  [9]  Payment Note(Memo)      [20] Primary EBD ID       (JS merge — extra, not in COLUMNS)
+     *  [10] Bank Account External ID [21] Secondary EBD ID    (JS merge — extra, not in COLUMNS)
+     *
+     * COLUMN_DATA_INDICES maps each display position to its raw data index.
+     * Elements [20] and [21] are extra — beyond COLUMNS.length so they don't
+     * appear in the table or CSV, but are available in JS for payment creation.
      */
     const COLUMNS = [
-        'Internal ID',              // display 0  → data[0]
+        'Invoice Internal ID',      // display 0  → data[0]
         'Add Payment Number',       // display 1  → data[1]
         'Payment Preference',       // display 2  → data[2]
         'Customer Internal ID',     // display 3  → data[3]
         'Subsidiary External ID',   // display 4  → data[4]
-        'EFT Type',                 // display 5  → data[18] ← moved before Bank Account
+        'EFT Type',                 // display 5  → data[18] ← inline <select> dropdown
         'Bank Account to Draft',    // display 6  → data[5]
         'Date',                     // display 7  → data[6]
         'Invoice Memo',             // display 8  → data[7]
@@ -110,7 +118,8 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
         'EFT Payment File Format'   // display 19 → data[19]
     ];
 
-    const COLUMN_DATA_INDICES = [0, 1, 2, 3, 4, 18, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 19];
+    // First 20 entries map to COLUMNS; last 2 are extra metadata for EBD IDs.
+    const COLUMN_DATA_INDICES = [0,1,2,3,4,18,5,6,7,8,9,10,11,12,13,14,15,16,17,19, 20,21];
 
     const BASE_FROM = `
         FROM transaction t
@@ -133,7 +142,7 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
 
     const DATA_SELECT = `
         SELECT
-            t.id                                                                AS "Internal ID",
+            t.id                                                                AS "Invoice Internal ID",
             sub.externalid || '-' || LPAD(TO_CHAR(t.id), 10, '0')             AS "Add Payment Number",
             BUILTIN.DF(c.custentity_gtf_payment_preference)                    AS "Payment Preference",
             c.id                                                                AS "Customer Internal ID",
@@ -158,12 +167,11 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
 
     const onRequest = (ctx) => {
         try {
-            const params         = ctx.request.parameters;
-            const exportMode     = params.export === '1';
-            const createMode     = params.action === 'create';
-            const changeEftMode  = params.action === 'changeefttype';
-            const scriptId       = params.script || '';
-            const deployId       = params.deploy || '';
+            const params     = ctx.request.parameters;
+            const exportMode = params.export === '1';
+            const createMode = params.action === 'create';
+            const scriptId   = params.script || '';
+            const deployId   = params.deploy || '';
 
             const rawSearchId = sanitize(params.f_search || '');
             const searchId    = SAVED_SEARCHES.some(s => s.id === rawSearchId) ? rawSearchId : '';
@@ -187,9 +195,7 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
             if (exportMode) {
                 streamCsv(ctx, filteredIds, params.ids || '');
             } else if (createMode) {
-                createPayments(ctx, params.ids || '', scriptId, deployId);
-            } else if (changeEftMode) {
-                changeEftType(ctx, params.ids || '', params.new_eft_type || '', scriptId, deployId);
+                createPayments(ctx, params.ids || '', params.ebd_ids || '', scriptId, deployId);
             } else {
                 renderPage(ctx, filters, savedIds, filteredIds, page, scriptId, deployId);
             }
@@ -344,6 +350,13 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
         return rows.map(r => { const c = r.slice(); c[9] = map[String(r[0])] || ''; return c; });
     };
 
+    /**
+     * Fetches both Primary (type 1) and Secondary (type 2) bank detail records
+     * per customer. Returns a map keyed by customer ID containing:
+     *   primaryEbdId, primaryName, primaryTypeName, primaryFormat
+     *   secondaryEbdId, secondaryName, secondaryFormat
+     * First record per type per customer wins (ORDER BY ebd.id).
+     */
     const fetchBankDetails = (customerIds) => {
         if (!customerIds || customerIds.length === 0) return {};
         const map       = {};
@@ -352,34 +365,74 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
             const idList = uniqueIds.slice(i, i + BATCH_SIZE).join(',');
             const sql = `
                 SELECT ebd.custrecord_2663_parent_cust_ref,
+                       ebd.id,
+                       ebd.custrecord_2663_entity_bank_type,
                        ebd.name,
                        BUILTIN.DF(ebd.custrecord_2663_entity_bank_type),
                        BUILTIN.DF(ebd.custrecord_2663_entity_file_format)
                 FROM customrecord_2663_entity_bank_details ebd
                 WHERE ebd.custrecord_2663_parent_cust_ref IN (${idList})
                   AND ebd.isinactive = 'F'
-                ORDER BY ebd.custrecord_2663_parent_cust_ref, ebd.id
+                ORDER BY ebd.custrecord_2663_parent_cust_ref, ebd.custrecord_2663_entity_bank_type, ebd.id
             `;
             const rs = query.runSuiteQL({ query: sql });
             (rs.results || []).forEach(row => {
-                const custId = String(row.values[0]);
+                const custId   = String(row.values[0]);
+                const ebdId    = String(row.values[1]);
+                const typeId   = String(row.values[2]);  // '1'=Primary, '2'=Secondary
+                const name     = row.values[3] || '';
+                const typeName = row.values[4] || '';
+                const format   = row.values[5] || '';
+
                 if (!map[custId]) {
-                    map[custId] = { name: row.values[1] || '', type: row.values[2] || '', format: row.values[3] || '' };
+                    map[custId] = {
+                        primaryEbdId: '', primaryName: '', primaryTypeName: 'Primary', primaryFormat: '',
+                        secondaryEbdId: '', secondaryName: '', secondaryFormat: ''
+                    };
+                }
+                if (typeId === '1' && !map[custId].primaryEbdId) {
+                    map[custId].primaryEbdId    = ebdId;
+                    map[custId].primaryName     = name;
+                    map[custId].primaryTypeName = typeName;
+                    map[custId].primaryFormat   = format;
+                } else if (typeId === '2' && !map[custId].secondaryEbdId) {
+                    map[custId].secondaryEbdId  = ebdId;
+                    map[custId].secondaryName   = name;
+                    map[custId].secondaryFormat = format;
                 }
             });
         }
         return map;
     };
 
+    /**
+     * Merges bank detail data into the raw row array.
+     * Sets indices 17-21:
+     *   [17] EFT Record Name (primary)
+     *   [18] EFT Type display text (primary — used for CSV export of EFT Type column)
+     *   [19] EFT Payment File Format (primary)
+     *   [20] Primary EBD internal ID  (extra — for payment creation)
+     *   [21] Secondary EBD internal ID (extra — '' if customer has no secondary)
+     */
     const mergeBankDetails = (rows) => {
         const map = fetchBankDetails(rows.map(r => r[3]).filter(Boolean));
         return rows.map(r => {
-            const copy = r.slice(); const d = map[String(r[3])] || {};
-            copy[17] = d.name || ''; copy[18] = d.type || ''; copy[19] = d.format || '';
+            const copy = r.slice();
+            const d = map[String(r[3])] || {};
+            copy[17] = d.primaryName     || '';
+            copy[18] = d.primaryTypeName || 'Primary';
+            copy[19] = d.primaryFormat   || '';
+            copy[20] = d.primaryEbdId    || '';
+            copy[21] = d.secondaryEbdId  || '';
             return copy;
         });
     };
 
+    /**
+     * Reorders raw data array to match COLUMNS display order.
+     * Produces a 22-element array: first 20 = COLUMNS, last 2 = EBD IDs (extra metadata).
+     * CSV export uses only row.slice(0, COLUMNS.length) so extra elements are not exported.
+     */
     const reorderRow = (row) => COLUMN_DATA_INDICES.map(i => (row[i] !== undefined ? row[i] : ''));
 
     const runPageQuery = (filteredIds, page) => {
@@ -434,10 +487,25 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
         return results;
     };
 
-    const createPayments = (ctx, idsParam, scriptId, deployId) => {
+    /**
+     * Creates Customer Payment records for the selected invoices.
+     *
+     * ebdIdsParam: parallel to idsParam — the EBD internal ID to use for each
+     * invoice, determined by the per-row EFT Type dropdown selection. Primary
+     * EBD ID is sent when the dropdown is Primary; Secondary when Secondary.
+     * Logged here for audit trail. Will be used to set the Payment Manager
+     * bank detail field on the payment record once that field is confirmed.
+     */
+    const createPayments = (ctx, idsParam, ebdIdsParam, scriptId, deployId) => {
         const rawBase = ctx.request.url.split('?')[0];
         const backUrl = rawBase + '?script=' + encodeURIComponent(scriptId) + '&deploy=' + encodeURIComponent(deployId);
-        const ids = (idsParam || '').split(',').map(s => parseInt(s.trim(), 10)).filter(n => n > 0);
+
+        const ids    = (idsParam    || '').split(',').map(s => parseInt(s.trim(), 10)).filter(n => n > 0);
+        const ebdIds = (ebdIdsParam || '').split(',').map(s => s.trim());
+
+        // Build invoice → selected EBD ID lookup
+        const ebdByTxn = {};
+        ids.forEach((id, idx) => { ebdByTxn[String(id)] = ebdIds[idx] || ''; });
 
         if (!ids.length) return renderActionResults(ctx, [], backUrl, 'No invoice IDs provided.', 'Payment Drafts — Creation Results', 'created');
         if (ids.length > MAX_CREATE) return renderActionResults(ctx, [], backUrl,
@@ -451,6 +519,9 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
             try {
                 if (!row.bankAccountId) throw new Error('Bank account could not be resolved — verify subsidiary bank account number');
                 if (!row.arAccountId)   throw new Error('AR account could not be resolved');
+
+                const selectedEbdId = ebdByTxn[String(row.txnId)] || '';
+                log.debug({ title: 'createPayments', details: `Invoice ${row.txnId} — using EBD ID: ${selectedEbdId}` });
 
                 const rec = record.create({ type: record.Type.CUSTOMER_PAYMENT, isDynamic: true });
                 rec.setValue({ fieldId: 'customer',                  value: parseInt(row.customerId) });
@@ -493,115 +564,9 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
     };
 
     // -------------------------------------------------------------------------
-    // EFT type change
+    // Results renderer
     // -------------------------------------------------------------------------
 
-    /**
-     * Resolves the first active bank detail record per customer for each invoice.
-     * Returns array of { txnId, custId, ebdId, currentType } objects.
-     * Multiple invoices for the same customer get the same ebdId — deduplicated
-     * during the update loop so the record is only written once per customer.
-     */
-    const fetchEftDetailIds = (txnIds) => {
-        if (!txnIds || txnIds.length === 0) return [];
-        const results = [];
-        for (let i = 0; i < txnIds.length; i += BATCH_SIZE) {
-            const idList = txnIds.slice(i, i + BATCH_SIZE).join(',');
-            const sql = `
-                SELECT t.id                                                     AS txn_id,
-                       c.id                                                     AS cust_id,
-                       ebd.id                                                   AS ebd_id,
-                       BUILTIN.DF(ebd.custrecord_2663_entity_bank_type)         AS current_type
-                FROM transaction t
-                JOIN customer c ON c.id = t.entity
-                JOIN customrecord_2663_entity_bank_details ebd
-                    ON ebd.custrecord_2663_parent_cust_ref = c.id
-                   AND ebd.isinactive = 'F'
-                WHERE t.id IN (${idList})
-                ORDER BY t.id, ebd.id
-            `;
-            const rs = query.runSuiteQL({ query: sql });
-            // First row per txnId = lowest EBD id (first active record)
-            const seen = new Set();
-            (rs.results || []).forEach(row => {
-                const txnId = String(row.values[0]);
-                if (!seen.has(txnId)) {
-                    seen.add(txnId);
-                    results.push({ txnId: row.values[0], custId: row.values[1], ebdId: row.values[2], currentType: row.values[3] });
-                }
-            });
-        }
-        return results;
-    };
-
-    const changeEftType = (ctx, idsParam, newTypeIdParam, scriptId, deployId) => {
-        const rawBase = ctx.request.url.split('?')[0];
-        const backUrl = rawBase + '?script=' + encodeURIComponent(scriptId) + '&deploy=' + encodeURIComponent(deployId);
-
-        const ids       = (idsParam || '').split(',').map(s => parseInt(s.trim(), 10)).filter(n => n > 0);
-        const newTypeId = parseInt(newTypeIdParam, 10);
-        const newTypeName = EFT_TYPES.find(t => t.id === String(newTypeId));
-
-        if (!ids.length) return renderActionResults(ctx, [], backUrl, 'No invoice IDs provided.', 'Payment Drafts — EFT Type Update', 'updated');
-        if (!newTypeName) return renderActionResults(ctx, [], backUrl, `Invalid EFT type value: ${newTypeIdParam}`, 'Payment Drafts — EFT Type Update', 'updated');
-        if (ids.length > MAX_EFT_CHANGE) return renderActionResults(ctx, [], backUrl,
-            `Selection of ${ids.length} exceeds the maximum batch size of ${MAX_EFT_CHANGE}. Please select fewer records.`,
-            'Payment Drafts — EFT Type Update', 'updated');
-
-        const rows    = fetchEftDetailIds(ids);
-        const results = [];
-
-        // Deduplicate: track which EBD records have already been updated this run
-        // so customers with multiple invoices selected don't trigger duplicate saves.
-        const updatedEbdIds = new Set();
-
-        rows.forEach(row => {
-            try {
-                if (!row.ebdId) throw new Error(`No active bank detail record found for customer ${row.custId}`);
-
-                const ebdId = String(row.ebdId);
-                if (!updatedEbdIds.has(ebdId)) {
-                    const rec = record.load({
-                        type      : 'customrecord_2663_entity_bank_details',
-                        id        : parseInt(row.ebdId),
-                        isDynamic : false
-                    });
-                    rec.setValue({ fieldId: 'custrecord_2663_entity_bank_type', value: newTypeId });
-                    rec.save();
-                    updatedEbdIds.add(ebdId);
-                }
-
-                results.push({
-                    label  : row.txnId,
-                    detail : `Customer ${row.custId} — was: ${row.currentType}`,
-                    success: true,
-                    link   : null
-                });
-            } catch (e) {
-                log.error({ title: 'changeEftType ERROR', details: `Invoice ${row.txnId}: ${e.message || e}` });
-                results.push({ label: row.txnId, detail: `Customer ${row.custId}`, success: false, error: e.message || String(e) });
-            }
-        });
-
-        // Surface any invoices that had no bank detail record (not in rows)
-        const resolvedTxnIds = new Set(rows.map(r => String(r.txnId)));
-        ids.forEach(id => {
-            if (!resolvedTxnIds.has(String(id))) {
-                results.push({ label: id, detail: '', success: false, error: 'No active bank detail record found' });
-            }
-        });
-
-        renderActionResults(ctx, results, backUrl, null, 'Payment Drafts — EFT Type Update', 'updated');
-    };
-
-    // -------------------------------------------------------------------------
-    // Shared results renderer (payment creation + EFT type change)
-    // -------------------------------------------------------------------------
-
-    /**
-     * Generic results page. verb is the past-tense action word shown in the banner.
-     * Each result object: { label, detail, success, error?, link?, linkLabel? }
-     */
     const renderActionResults = (ctx, results, backUrl, errorMsg, pageTitle, verb) => {
         const succeeded = results.filter(r =>  r.success).length;
         const failed    = results.filter(r => !r.success).length;
@@ -610,7 +575,6 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
         const bannerBorder = errorMsg || failed > 0 ? '#ffc107' : '#28a745';
 
         let body = `<div style="font-family:Arial,sans-serif;font-size:12px">`;
-
         if (errorMsg) {
             body += `<div style="background:${bannerColor};border:1px solid ${bannerBorder};border-radius:4px;padding:12px 16px;margin-bottom:14px;color:#856404">
                 <strong>Cannot process:</strong> ${escHtml(errorMsg)}</div>`;
@@ -634,7 +598,6 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
                         }
                     </td>
                 </tr>`).join('');
-
             body += `<table style="border-collapse:collapse;width:100%;margin-bottom:16px">
                 <thead><tr>
                     <th style="background:#1f5ea8;color:#fff;padding:6px 8px;text-align:left;font-size:11px;white-space:nowrap">Invoice ID</th>
@@ -691,13 +654,43 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
                       + COLUMNS.map(c => `<th>${escHtml(c)}</th>`).join('');
 
         const trRows = rows.map(row => {
-            const id       = row[0] == null ? '' : String(row[0]);
-            const drillUrl = id ? `/app/accounting/transactions/custinvc.nl?id=${encodeURIComponent(id)}` : '';
-            const cbCell   = `<td style="text-align:center"><input type="checkbox" class="pnd-row-cb" data-id="${escHtml(id)}"></td>`;
-            const tds = row.map((v, i) => {
-                const val = escHtml(v == null ? '' : String(v));
-                return (i === 0 && drillUrl) ? `<td><a href="${drillUrl}" target="_blank">${val}</a></td>` : `<td>${val}</td>`;
+            // After reorderRow:
+            //   row[0]  = Invoice Internal ID (transaction id)
+            //   row[5]  = EFT Type display text (primary — for reference only, dropdown is authoritative)
+            //   row[20] = Primary EBD ID
+            //   row[21] = Secondary EBD ID ('' if none)
+            const id           = row[0] == null ? '' : String(row[0]);
+            const primaryEbdId = row[20] != null ? String(row[20]) : '';
+            const secEbdId     = row[21] != null ? String(row[21]) : '';
+            const drillUrl     = id ? `/app/accounting/transactions/custinvc.nl?id=${encodeURIComponent(id)}` : '';
+            const hasSecondary = secEbdId !== '';
+
+            // Checkbox carries both EBD IDs as data-attributes for payment submission
+            const cbCell = `<td style="text-align:center">
+                <input type="checkbox" class="pnd-row-cb"
+                       data-id="${escHtml(id)}"
+                       data-primary-ebd="${escHtml(primaryEbdId)}"
+                       data-secondary-ebd="${escHtml(secEbdId)}">
+            </td>`;
+
+            // Render only the first COLUMNS.length elements as cells
+            const tds = row.slice(0, COLUMNS.length).map((v, i) => {
+                if (i === 0 && drillUrl) {
+                    return `<td><a href="${drillUrl}" target="_blank">${escHtml(v == null ? '' : String(v))}</a></td>`;
+                }
+                if (i === 5) {
+                    // EFT Type — inline dropdown, defaults to Primary
+                    return `<td>
+                        <select class="pnd-eft-sel" data-id="${escHtml(id)}"
+                                style="font-size:11px;border:1px solid #bbb;border-radius:2px;padding:2px 4px;cursor:pointer;background:#fff">
+                            <option value="1">Primary</option>
+                            ${hasSecondary ? '<option value="2">Secondary</option>' : ''}
+                        </select>
+                    </td>`;
+                }
+                return `<td>${escHtml(v == null ? '' : String(v))}</td>`;
             }).join('');
+
             return `<tr>${cbCell}${tds}</tr>`;
         }).join('\n');
 
@@ -750,12 +743,9 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
   .pnd-create { background: #0d47a1; color: #fff; border-color: #0d47a1; }
   .pnd-create:not([disabled]):hover { background: #0a3580; }
   .pnd-create[disabled] { opacity: .45; cursor: not-allowed; }
-  .pnd-eft   { background: #6a1b9a; color: #fff; border-color: #6a1b9a; }
-  .pnd-eft:not([disabled]):hover { background: #4a148c; }
-  .pnd-eft[disabled] { opacity: .45; cursor: not-allowed; }
-  .pnd-mark  { background: #fff; color: #333; border-color: #aaa; }
+  .pnd-mark   { background: #fff; color: #333; border-color: #aaa; }
   .pnd-mark:hover { background: #f0f4fb; }
-  .pnd-count { color: #555; font-size: 12px; }
+  .pnd-count  { color: #555; font-size: 12px; }
   .pnd-pagination { display: flex; align-items: center; gap: 4px; margin-left: auto; }
   .pg-btn, .pg-ellipsis {
     display: inline-block; padding: 3px 8px; font-size: 11px;
@@ -781,37 +771,8 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
   #pnd-table tr.pnd-selected td { background: #c8d8f8 !important; }
   #pnd-check-all, .pnd-row-cb { cursor: pointer; width: 14px; height: 14px; }
   .pnd-no-results { padding: 20px; color: #888; text-align: center; }
-  /* EFT type prompt overlay */
-  #pnd-eft-overlay {
-    display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-    background: rgba(0,0,0,.35); z-index: 9998;
-  }
-  #pnd-eft-prompt {
-    display: none; position: fixed; top: 50%; left: 50%; transform: translate(-50%,-50%);
-    background: #fff; border: 1px solid #c8d4e8; border-radius: 6px;
-    padding: 20px 24px; box-shadow: 0 4px 20px rgba(0,0,0,.18);
-    z-index: 9999; min-width: 300px;
-  }
-  #pnd-eft-prompt h3 { margin: 0 0 8px; font-size: 13px; color: #1f5ea8; }
-  #pnd-eft-prompt p  { margin: 0 0 16px; font-size: 12px; color: #555; }
-  .pnd-eft-choice-row { display: flex; gap: 8px; }
-  .pnd-btn-primary-choice { background: #2e7d32; color: #fff; border-color: #2e7d32; flex: 1; text-align: center; }
-  .pnd-btn-primary-choice:hover { background: #1b5e20; }
-  .pnd-btn-secondary-choice { background: #e65100; color: #fff; border-color: #e65100; flex: 1; text-align: center; }
-  .pnd-btn-secondary-choice:hover { background: #bf360c; }
+  .pnd-eft-sel { min-width: 80px; }
 </style>
-
-<!-- EFT type change overlay + prompt -->
-<div id="pnd-eft-overlay" onclick="hideEftTypePrompt()"></div>
-<div id="pnd-eft-prompt">
-  <h3>&#8646; Change EFT Type</h3>
-  <p id="pnd-eft-prompt-msg">Change 0 selected records to:</p>
-  <div class="pnd-eft-choice-row">
-    <button type="button" class="pnd-btn pnd-btn-primary-choice"   onclick="submitEftTypeChange('1')">&#10003; Primary</button>
-    <button type="button" class="pnd-btn pnd-btn-secondary-choice" onclick="submitEftTypeChange('2')">&#10003; Secondary</button>
-    <button type="button" class="pnd-btn pnd-reset" onclick="hideEftTypePrompt()">Cancel</button>
-  </div>
-</div>
 
 <div id="pnd-wrap">
 
@@ -864,9 +825,6 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
     <a id="pnd-export-link" class="pnd-btn pnd-export" href="${escHtml(exportUrl)}">&#11015; Export to CSV</a>
     <button type="button" id="pnd-create-btn" class="pnd-btn pnd-create" onclick="createSelectedPayments()" disabled>
       &#9654; Create Payment Drafts (0)
-    </button>
-    <button type="button" id="pnd-eft-btn" class="pnd-btn pnd-eft" onclick="showEftTypePrompt()" disabled>
-      &#8646; Change EFT Type (0)
     </button>
     <button type="button" class="pnd-btn pnd-mark" onclick="toggleAll(true)">&#9745; Mark All</button>
     <button type="button" class="pnd-btn pnd-mark" onclick="toggleAll(false)">&#9744; Unmark All</button>
@@ -927,10 +885,6 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
     createBtn.textContent = '\u25B6 Create Payment Drafts (' + count + ')';
     createBtn.disabled    = count === 0;
 
-    var eftBtn = document.getElementById('pnd-eft-btn');
-    eftBtn.textContent = '\u21C6 Change EFT Type (' + count + ')';
-    eftBtn.disabled    = count === 0;
-
     var exportLink = document.getElementById('pnd-export-link');
     if (count > 0) {
       var ids = checked.map(function(cb) { return cb.dataset.id; }).join(',');
@@ -984,51 +938,37 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
   };
 
   window.createSelectedPayments = function() {
-    var checked = getChecked().map(function(cb) { return cb.dataset.id; });
+    var checked = getChecked();
     if (!checked.length) { alert('No records selected.'); return; }
     if (checked.length > ${MAX_CREATE}) {
       alert('Maximum ${MAX_CREATE} records per batch. Currently selected: ' + checked.length + '. Please select fewer records.');
       return;
     }
     if (!confirm('Create ' + checked.length + ' Customer Payment record' + (checked.length !== 1 ? 's' : '') + '?\\nThis cannot be undone.')) return;
+
+    var ids    = [];
+    var ebdIds = [];
+    checked.forEach(function(cb) {
+      ids.push(cb.dataset.id);
+      // Find the EFT Type dropdown in the same row to determine which EBD ID to use
+      var row    = cb.closest('tr');
+      var sel    = row ? row.querySelector('.pnd-eft-sel') : null;
+      var selVal = sel ? sel.value : '1';  // default Primary if dropdown not found
+      // Use the EBD ID matching the selected type
+      var ebdId  = (selVal === '2' && cb.dataset.secondaryEbd)
+                      ? cb.dataset.secondaryEbd
+                      : cb.dataset.primaryEbd;
+      ebdIds.push(ebdId || '');
+    });
+
     var f = document.createElement('form');
     f.method = 'POST'; f.action = baseUrl + '&action=create';
-    var inp = document.createElement('input');
-    inp.type = 'hidden'; inp.name = 'ids'; inp.value = checked.join(',');
-    f.appendChild(inp); document.body.appendChild(f); f.submit();
-  };
-
-  // ---- EFT type change ----
-
-  window.showEftTypePrompt = function() {
-    var checked = getChecked();
-    if (!checked.length) return;
-    document.getElementById('pnd-eft-prompt-msg').textContent =
-      'Update the bank detail EFT type for ' + checked.length + ' selected invoice' +
-      (checked.length !== 1 ? 's' : '') + ' to:';
-    document.getElementById('pnd-eft-overlay').style.display = 'block';
-    document.getElementById('pnd-eft-prompt').style.display  = 'block';
-  };
-
-  window.hideEftTypePrompt = function() {
-    document.getElementById('pnd-eft-overlay').style.display = 'none';
-    document.getElementById('pnd-eft-prompt').style.display  = 'none';
-  };
-
-  window.submitEftTypeChange = function(newTypeId) {
-    hideEftTypePrompt();
-    var checked = getChecked().map(function(cb) { return cb.dataset.id; });
-    if (!checked.length) return;
-    var typeName = newTypeId === '1' ? 'Primary' : 'Secondary';
-    if (!confirm('Change ' + checked.length + ' record' + (checked.length !== 1 ? 's' : '') +
-        ' to ' + typeName + '?\\nThis updates the bank detail record for each customer.')) return;
-    var f = document.createElement('form');
-    f.method = 'POST'; f.action = baseUrl + '&action=changeefttype';
     var inp1 = document.createElement('input');
-    inp1.type = 'hidden'; inp1.name = 'ids'; inp1.value = checked.join(',');
+    inp1.type = 'hidden'; inp1.name = 'ids'; inp1.value = ids.join(',');
     var inp2 = document.createElement('input');
-    inp2.type = 'hidden'; inp2.name = 'new_eft_type'; inp2.value = newTypeId;
-    f.appendChild(inp1); f.appendChild(inp2); document.body.appendChild(f); f.submit();
+    inp2.type = 'hidden'; inp2.name = 'ebd_ids'; inp2.value = ebdIds.join(',');
+    f.appendChild(inp1); f.appendChild(inp2);
+    document.body.appendChild(f); f.submit();
   };
 
   updateToolbar();
@@ -1057,6 +997,7 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
 
     const buildCsv = (rows) => {
         const header = COLUMNS.map(csvCell).join(',');
+        // row.slice(0, COLUMNS.length) excludes the extra EBD ID elements at positions 20-21
         const lines  = rows.map(row => row.slice(0, COLUMNS.length).map(csvCell).join(','));
         return [header, ...lines].join('\r\n');
     };
