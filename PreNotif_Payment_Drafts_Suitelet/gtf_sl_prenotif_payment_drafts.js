@@ -18,11 +18,10 @@
  * Chore (2026-04-02d): Removed EFT Type and Store Number filter controls.
  * Chore (2026-04-02e): Master Franchisee → Subsidiary filter (sub.id);
  *   Week Ending Date filter removed.
- * Fix (2026-04-02f): Mark All now selects all records across all pages, not
- *   just the current page. Full filteredIds array injected server-side as
- *   allFilteredIds. allPagesSelected flag drives toolbar counts and submission.
- *   Blue info banner shown when multi-page selection is active.
- *   Individual row interaction exits all-pages mode.
+ * Fix (2026-04-02f): Mark All / Unmark All buttons select/deselect ALL records
+ *   across all pages. Full filteredIds injected server-side as allFilteredIds.
+ *   Header checkbox is PAGE-SCOPED only — does not trigger all-pages mode.
+ *   Individual row interaction also exits all-pages mode.
  */
 
 define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
@@ -254,10 +253,6 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
         return rows.map(r=>{const c=r.slice();c[9]=map[String(r[0])]||'';return c;});
     };
 
-    /**
-     * Fetches Primary (1) and Secondary (2) EBD records per customer.
-     * Returns map: custId → { primaryEbdId, primaryName, primaryTypeName, primaryFormat, secondaryEbdId, ... }
-     */
     const fetchBankDetails = (customerIds) => {
         if (!customerIds || !customerIds.length) return {};
         const map = {};
@@ -434,7 +429,7 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
         const exportUrl=buildUrl({export:'1',page:''});
         const selOptsSavedSearches=`<option value=""${!filters.search?' selected':''}>-- Select a Search --</option>`+SAVED_SEARCHES.map(s=>`<option value="${escHtml(s.id)}"${s.id===filters.search?' selected':''}>${escHtml(s.label)}</option>`).join('');
         const selOptsPairs=(pairs,sel)=>pairs.map(p=>`<option value="${escHtml(p.id)}"${String(p.id)===String(sel)?' selected':''}>${escHtml(p.name)}</option>`).join('');
-        const thCells=`<th style="width:32px;text-align:center"><input type="checkbox" id="pnd-check-all"></th>`+COLUMNS.map(c=>`<th>${escHtml(c)}</th>`).join('');
+        const thCells=`<th style="width:32px;text-align:center"><input type="checkbox" id="pnd-check-all" title="Select/deselect current page"></th>`+COLUMNS.map(c=>`<th>${escHtml(c)}</th>`).join('');
         const trRows=rows.map(row=>{
             const id=row[0]==null?'':String(row[0]);
             const primaryEbdId=row[20]!=null?String(row[20]):'';
@@ -550,7 +545,8 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
 (function() {
   var baseUrl        = ${JSON.stringify(baseUrl)};
   var exportBase     = ${JSON.stringify(exportUrl)};
-  // Full filtered ID list across all pages — injected server-side.
+  // Full filtered ID list across all pages — injected server-side at render time.
+  // Used by Mark All / Unmark All to operate across all pages.
   var allFilteredIds   = ${JSON.stringify(filteredIds)};
   var allPagesSelected = false;
 
@@ -602,11 +598,12 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
     }
   }
 
+  // Reflects current PAGE state only — not tied to allPagesSelected
   function updateHeaderCheckbox() {
     var all=getCheckboxes(), chk=getChecked(), hdr=document.getElementById('pnd-check-all');
     if (!hdr) return;
-    hdr.indeterminate = !allPagesSelected && chk.length > 0 && chk.length < all.length;
-    hdr.checked = allPagesSelected || (all.length > 0 && chk.length === all.length);
+    hdr.indeterminate = chk.length > 0 && chk.length < all.length;
+    hdr.checked = all.length > 0 && chk.length === all.length;
   }
 
   // Individual row interaction — exits all-pages mode
@@ -625,14 +622,25 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
     cb.addEventListener('change', function(){onRowCheckChange(cb);});
   });
 
+  // Header checkbox is PAGE-SCOPED only — does not trigger all-pages selection
   var hdrCb = document.getElementById('pnd-check-all');
   if (hdrCb) {
     hdrCb.addEventListener('change', function() {
-      toggleAll(hdrCb.checked);
+      if (allPagesSelected) {
+        allPagesSelected = false;
+        setAllPagesBanner(false);
+      }
+      getCheckboxes().forEach(function(cb) {
+        cb.checked = hdrCb.checked;
+        var row = cb.closest('tr');
+        if (row) row.classList.toggle('pnd-selected', hdrCb.checked);
+      });
+      updateHeaderCheckbox();
+      updateToolbar();
     });
   }
 
-  // Mark All / Unmark All — operates across ALL pages, not just the visible page.
+  // Mark All / Unmark All buttons — ALL pages, not just the visible page
   window.toggleAll = function(checked) {
     allPagesSelected = checked;
     getCheckboxes().forEach(function(cb) {
@@ -640,7 +648,6 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
       var row = cb.closest('tr');
       if (row) row.classList.toggle('pnd-selected', checked);
     });
-    // Show banner only when all-pages mode is active and results span multiple pages
     setAllPagesBanner(checked && allFilteredIds.length > getCheckboxes().length);
     updateHeaderCheckbox();
     updateToolbar();
@@ -663,11 +670,9 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
     i2.type = 'hidden'; i2.name = 'ebd_ids';
 
     if (allPagesSelected) {
-      // All pages — use full filtered list; EFT type defaults to Primary for all
       i1.value = allFilteredIds.join(',');
       i2.value = '';
     } else {
-      // Per-page — use checked rows with per-row EFT dropdown values
       var ids = [], ebdIds = [];
       getChecked().forEach(function(cb) {
         ids.push(cb.dataset.id);
