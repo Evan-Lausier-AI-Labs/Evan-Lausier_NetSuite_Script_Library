@@ -17,10 +17,11 @@
  * Fix (2026-04-02g): \\n literal newline JS syntax error fixed.
  * Chore (2026-04-02h): Mark All / Unmark All buttons styled blue (pnd-apply).
  * Fix (2026-04-02i): Removed explicit undepfunds=false.
- * Fix (2026-04-02j): fetchCreateData now uses sub.custrecord4 (GTF Bank Internal
- *   ID) directly as the bank account instead of resolving via externalid LEFT JOIN,
- *   which was resolving the wrong account and causing "Please enter a value for
- *   Account" on save.
+ * Fix (2026-04-02j): Bank account sourced from customer's subsidiary (cs.custrecord4)
+ *   rather than the transaction line's subsidiary. In dynamic mode, NS forces the
+ *   payment subsidiary to the customer's home subsidiary, so the bank account must
+ *   come from that same subsidiary. Both DATA_SELECT (display) and fetchCreateData
+ *   (creation) now join JOIN subsidiary cs ON cs.id = c.subsidiary.
  */
 
 define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
@@ -52,13 +53,13 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
         'Customer Internal ID',     // 3  → data[3]
         'Subsidiary External ID',   // 4  → data[4]
         'EFT Type',                 // 5  → data[18] ← inline dropdown
-        'Bank Account to Draft',    // 6  → data[5]
+        'Bank Account to Draft',    // 6  → data[5]  ← from customer subsidiary (cs)
         'Date',                     // 7  → data[6]
         'Invoice Memo',             // 8  → data[7]
         'AR Account External ID',   // 9  → data[8]
         'Payment Note(Memo)',       // 10 → data[9]
-        'Bank Account External ID', // 11 → data[10]
-        'GTF Bank Internal ID',     // 12 → data[11]
+        'Bank Account External ID', // 11 → data[10] ← from customer subsidiary (cs)
+        'GTF Bank Internal ID',     // 12 → data[11] ← from customer subsidiary (cs)
         'Currency',                 // 13 → data[12]
         'Payment Amount',           // 14 → data[13]
         'Apply to Invoice ID',      // 15 → data[14]
@@ -70,11 +71,14 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
 
     const COLUMN_DATA_INDICES = [0,1,2,3,4,18,5,6,7,8,9,10,11,12,13,14,15,16,17,19,20,21];
 
+    // BASE_FROM joins both the transaction's subsidiary (sub, for Subsidiary External ID
+    // display) and the customer's subsidiary (cs, for bank account fields and payment creation).
     const BASE_FROM = `
         FROM transaction t
         JOIN transactionline tl ON tl.transaction = t.id AND tl.mainline = 'T' AND tl.taxline = 'F'
         JOIN customer   c   ON c.id   = t.entity
         JOIN subsidiary sub ON sub.id = tl.subsidiary
+        JOIN subsidiary cs  ON cs.id  = c.subsidiary
         JOIN account    a   ON a.id   = tl.expenseaccount
     `;
 
@@ -92,13 +96,13 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
             BUILTIN.DF(c.custentity_gtf_payment_preference)                    AS "Payment Preference",
             c.id                                                                AS "Customer Internal ID",
             sub.externalid                                                      AS "Subsidiary External ID",
-            sub.custrecord_gtf_bank_account_number                              AS "Bank Account to Draft",
+            cs.custrecord_gtf_bank_account_number                               AS "Bank Account to Draft",
             TO_CHAR(t.trandate, 'MM/DD/YYYY')                                  AS "Date",
             t.memo                                                              AS "Invoice Memo",
             a.externalid                                                        AS "AR Account External ID",
             NULL                                                                AS "Payment Note(Memo)",
-            sub.custrecord_gtf_bank_account_number                              AS "Bank Account External ID",
-            sub.custrecord4                                                      AS "GTF Bank Internal ID",
+            cs.custrecord_gtf_bank_account_number                               AS "Bank Account External ID",
+            cs.custrecord4                                                       AS "GTF Bank Internal ID",
             BUILTIN.DF(t.currency)                                              AS "Currency",
             REPLACE(TO_CHAR(t.foreigntotal), ',', '')                          AS "Payment Amount",
             t.id                                                                AS "Apply to Invoice ID",
@@ -308,22 +312,20 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
     // Payment creation
     // -------------------------------------------------------------------------
 
-    /**
-     * Fetches the fields needed to create a Customer Payment for each invoice.
-     * Bank account uses sub.custrecord4 (GTF Bank Internal ID) — the direct
-     * internal ID stored on the subsidiary, matching the "GTF Bank Internal ID"
-     * column already displayed in the Suitelet. This avoids an externalid JOIN
-     * which was resolving a different account and causing save errors.
-     */
     const fetchCreateData = (txnIds) => {
         if (!txnIds||!txnIds.length) return [];
         const results=[];
         for (let i=0;i<txnIds.length;i+=BATCH_SIZE){
-            const sql=`SELECT t.id,c.id,sub.id,sub.custrecord4,a.id,t.currency,
+            // Subsidiary and bank account come from the CUSTOMER's subsidiary (cs).
+            // In dynamic mode, NS forces payment subsidiary to the customer's home
+            // subsidiary — so the bank account must come from that same subsidiary.
+            const sql=`SELECT t.id,c.id,c.subsidiary,cs.custrecord4,a.id,t.currency,
                        sub.externalid||'-'||LPAD(TO_CHAR(t.id),10,'0'),t.memo,t.foreigntotal,TO_CHAR(t.trandate,'YYYY-MM-DD')
                 FROM transaction t
                 JOIN transactionline tl ON tl.transaction=t.id AND tl.mainline='T' AND tl.taxline='F'
-                JOIN customer c ON c.id=t.entity JOIN subsidiary sub ON sub.id=tl.subsidiary
+                JOIN customer c ON c.id=t.entity
+                JOIN subsidiary sub ON sub.id=tl.subsidiary
+                JOIN subsidiary cs ON cs.id=c.subsidiary
                 JOIN account a ON a.id=tl.expenseaccount
                 WHERE t.id IN(${txnIds.slice(i,i+BATCH_SIZE).join(',')})`;
             (query.runSuiteQL({query:sql}).results||[]).forEach(row=>{
@@ -349,7 +351,7 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
         const rows=fetchCreateData(ids), results=[];
         rows.forEach(row=>{
             try {
-                if (!row.bankAccountId) throw new Error('Bank account could not be resolved — verify GTF Bank Internal ID on subsidiary');
+                if (!row.bankAccountId) throw new Error('Bank account could not be resolved — verify GTF Bank Internal ID on customer subsidiary');
                 if (!row.arAccountId)   throw new Error('AR account could not be resolved');
                 const selectedEbdId=ebdByTxn[String(row.txnId)]||'';
                 log.debug({title:'createPayments',details:`Invoice ${row.txnId} — EBD ID: ${selectedEbdId}`});
