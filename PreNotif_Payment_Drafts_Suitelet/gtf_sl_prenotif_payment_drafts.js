@@ -16,8 +16,11 @@
  * Fix (2026-04-02f): Mark All selects all pages via allFilteredIds.
  * Fix (2026-04-02g): \\n literal newline JS syntax error fixed.
  * Chore (2026-04-02h): Mark All / Unmark All buttons styled blue (pnd-apply).
- * Fix (2026-04-02i): Removed explicit undepfunds=false — NS rejects this when
- *   a specific bank account is already set via the account field.
+ * Fix (2026-04-02i): Removed explicit undepfunds=false.
+ * Fix (2026-04-02j): fetchCreateData now uses sub.custrecord4 (GTF Bank Internal
+ *   ID) directly as the bank account instead of resolving via externalid LEFT JOIN,
+ *   which was resolving the wrong account and causing "Please enter a value for
+ *   Account" on save.
  */
 
 define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
@@ -305,17 +308,23 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
     // Payment creation
     // -------------------------------------------------------------------------
 
+    /**
+     * Fetches the fields needed to create a Customer Payment for each invoice.
+     * Bank account uses sub.custrecord4 (GTF Bank Internal ID) — the direct
+     * internal ID stored on the subsidiary, matching the "GTF Bank Internal ID"
+     * column already displayed in the Suitelet. This avoids an externalid JOIN
+     * which was resolving a different account and causing save errors.
+     */
     const fetchCreateData = (txnIds) => {
         if (!txnIds||!txnIds.length) return [];
         const results=[];
         for (let i=0;i<txnIds.length;i+=BATCH_SIZE){
-            const sql=`SELECT t.id,c.id,sub.id,bank_acct.id,a.id,t.currency,
+            const sql=`SELECT t.id,c.id,sub.id,sub.custrecord4,a.id,t.currency,
                        sub.externalid||'-'||LPAD(TO_CHAR(t.id),10,'0'),t.memo,t.foreigntotal,TO_CHAR(t.trandate,'YYYY-MM-DD')
                 FROM transaction t
                 JOIN transactionline tl ON tl.transaction=t.id AND tl.mainline='T' AND tl.taxline='F'
                 JOIN customer c ON c.id=t.entity JOIN subsidiary sub ON sub.id=tl.subsidiary
                 JOIN account a ON a.id=tl.expenseaccount
-                LEFT JOIN account bank_acct ON bank_acct.externalid=sub.custrecord_gtf_bank_account_number
                 WHERE t.id IN(${txnIds.slice(i,i+BATCH_SIZE).join(',')})`;
             (query.runSuiteQL({query:sql}).results||[]).forEach(row=>{
                 results.push({txnId:row.values[0],customerId:row.values[1],subsidiaryId:row.values[2],
@@ -340,7 +349,7 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
         const rows=fetchCreateData(ids), results=[];
         rows.forEach(row=>{
             try {
-                if (!row.bankAccountId) throw new Error('Bank account could not be resolved — verify subsidiary bank account number');
+                if (!row.bankAccountId) throw new Error('Bank account could not be resolved — verify GTF Bank Internal ID on subsidiary');
                 if (!row.arAccountId)   throw new Error('AR account could not be resolved');
                 const selectedEbdId=ebdByTxn[String(row.txnId)]||'';
                 log.debug({title:'createPayments',details:`Invoice ${row.txnId} — EBD ID: ${selectedEbdId}`});
@@ -356,9 +365,6 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
                 rec.setValue({fieldId:'tranid',value:row.paymentNumber});
                 rec.setValue({fieldId:'payment',value:parseFloat(row.paymentAmount)});
                 rec.setValue({fieldId:'custbody_9997_is_for_ep_dd',value:true});
-                // Note: undepfunds is NOT set explicitly — NS determines this
-                // automatically from the account field. Setting it to false
-                // throws "Invalid Field Value false" when a bank account is used.
                 const lineCount=rec.getLineCount({sublistId:'apply'});
                 let applied=false;
                 for (let i=0;i<lineCount;i++){
