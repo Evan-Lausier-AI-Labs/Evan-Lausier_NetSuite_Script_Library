@@ -17,6 +17,8 @@
  *   with payment creation. Column 0 renamed "Invoice Internal ID".
  * Chore (2026-04-02d): Removed EFT Type and Store Number filter controls from
  *   the filter bar — EFT type selection is handled per-row via inline dropdown.
+ * Chore (2026-04-02e): Filter bar — Master Franchisee renamed to Subsidiary
+ *   (now filters on sub.id); Week Ending Date filter removed.
  */
 
 define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
@@ -119,12 +121,11 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
             const searchId    = SAVED_SEARCHES.some(s => s.id === rawSearchId) ? rawSearchId : '';
 
             const filters = {
-                search: searchId,
-                brand : sanitize(params.f_brand || ''),
-                franc : sanitize(params.f_franc || ''),
-                week  : sanitize(params.f_week  || ''),
-                from  : sanitize(params.f_from  || ''),
-                to    : sanitize(params.f_to    || '')
+                search    : searchId,
+                brand     : sanitize(params.f_brand      || ''),
+                subsidiary: sanitize(params.f_subsidiary || ''),
+                from      : sanitize(params.f_from       || ''),
+                to        : sanitize(params.f_to         || '')
             };
 
             const filterWhere = buildFilterWhere(filters);
@@ -195,34 +196,32 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
 
     const buildFilterWhere = (f) => {
         const clauses = [];
-        if (f.brand) clauses.push(`c.custentity_gtf_brand = ${parseInt(f.brand, 10)}`);
-        if (f.franc) clauses.push(`c.parent = ${parseInt(f.franc, 10)}`);
-        if (f.week)  clauses.push(`TO_CHAR(t.custbody_gtf_weekenddate, 'MM/DD/YYYY') = '${f.week}'`);
-        if (f.from)  clauses.push(`t.trandate >= TO_DATE('${f.from}', 'YYYY-MM-DD')`);
-        if (f.to)    clauses.push(`t.trandate <= TO_DATE('${f.to}', 'YYYY-MM-DD')`);
+        if (f.brand)      clauses.push(`c.custentity_gtf_brand = ${parseInt(f.brand, 10)}`);
+        if (f.subsidiary) clauses.push(`sub.id = ${parseInt(f.subsidiary, 10)}`);
+        if (f.from)       clauses.push(`t.trandate >= TO_DATE('${f.from}', 'YYYY-MM-DD')`);
+        if (f.to)         clauses.push(`t.trandate <= TO_DATE('${f.to}', 'YYYY-MM-DD')`);
         return clauses.length ? ' AND ' + clauses.join(' AND ') : '';
     };
 
     const runDropdownQuery = (savedIds) => {
-        const brandMap = new Map(), francMap = new Map(), weeks = new Set();
+        const brandMap = new Map(), subMap = new Map();
         for (let i = 0; i < savedIds.length; i += BATCH_SIZE) {
             const sql = `
                 SELECT DISTINCT c.custentity_gtf_brand, BUILTIN.DF(c.custentity_gtf_brand),
-                    c.parent, BUILTIN.DF(c.parent), NVL(TO_CHAR(t.custbody_gtf_weekenddate,'MM/DD/YYYY'),'')
-                ${LIGHT_FROM} WHERE t.id IN (${savedIds.slice(i,i+BATCH_SIZE).join(',')}) ORDER BY 2,4,5
+                    sub.id, sub.name
+                ${LIGHT_FROM} WHERE t.id IN (${savedIds.slice(i,i+BATCH_SIZE).join(',')}) ORDER BY 2, 4
             `;
             const paged = query.runSuiteQLPaged({ query: sql, pageSize: 1000 });
             paged.pageRanges.forEach(range => {
                 (paged.fetch({ index: range.index }).data.results || []).forEach(row => {
-                    const [bId, bName, fId, fName, week] = row.values;
+                    const [bId, bName, sId, sName] = row.values;
                     if (bId && bName) brandMap.set(String(bId), String(bName));
-                    if (fId && fName) francMap.set(String(fId), String(fName));
-                    if (week) weeks.add(String(week));
+                    if (sId && sName) subMap.set(String(sId), String(sName));
                 });
             });
         }
         const sortPairs = m => Array.from(m.entries()).map(([id,name])=>({id,name})).sort((a,b)=>a.name.localeCompare(b.name));
-        return { brands: sortPairs(brandMap), francs: sortPairs(francMap), weeks: Array.from(weeks).filter(v=>v).sort() };
+        return { brands: sortPairs(brandMap), subsidiaries: sortPairs(subMap) };
     };
 
     // -------------------------------------------------------------------------
@@ -424,14 +423,13 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
 
     const buildHtml = (rows, filters, dropdowns, page, totalPages, total, baseUrl) => {
         const buildUrl = (overrides) => {
-            const p = Object.assign({f_search:filters.search,f_brand:filters.brand,f_franc:filters.franc,f_week:filters.week,f_from:filters.from,f_to:filters.to,page},overrides);
+            const p = Object.assign({f_search:filters.search,f_brand:filters.brand,f_subsidiary:filters.subsidiary,f_from:filters.from,f_to:filters.to,page},overrides);
             const qs = Object.entries(p).filter(([,v])=>v!==''&&v!==null&&v!==undefined).map(([k,v])=>encodeURIComponent(k)+'='+encodeURIComponent(v)).join('&');
             return baseUrl+(qs?'&'+qs:'');
         };
         const exportUrl=buildUrl({export:'1',page:''});
         const selOptsSavedSearches=`<option value=""${!filters.search?' selected':''}>-- Select a Search --</option>`+SAVED_SEARCHES.map(s=>`<option value="${escHtml(s.id)}"${s.id===filters.search?' selected':''}>${escHtml(s.label)}</option>`).join('');
         const selOptsPairs=(pairs,sel)=>pairs.map(p=>`<option value="${escHtml(p.id)}"${String(p.id)===String(sel)?' selected':''}>${escHtml(p.name)}</option>`).join('');
-        const selOptsWeeks=(vals,sel)=>vals.map(v=>`<option value="${escHtml(v)}"${v===sel?' selected':''}>${escHtml(v)}</option>`).join('');
         const thCells=`<th style="width:32px;text-align:center"><input type="checkbox" id="pnd-check-all"></th>`+COLUMNS.map(c=>`<th>${escHtml(c)}</th>`).join('');
         const trRows=rows.map(row=>{
             const id=row[0]==null?'':String(row[0]);
@@ -499,12 +497,8 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
       <select id="f-brand"><option value="">- All -</option>${selOptsPairs(dropdowns.brands,filters.brand)}</select>
     </div>
     <div class="pnd-fg">
-      <label>Master Franchisee</label>
-      <select id="f-franc"><option value="">- All -</option>${selOptsPairs(dropdowns.francs,filters.franc)}</select>
-    </div>
-    <div class="pnd-fg">
-      <label>Week Ending Date</label>
-      <select id="f-week"><option value="">All</option>${selOptsWeeks(dropdowns.weeks,filters.week)}</select>
+      <label>Subsidiary</label>
+      <select id="f-subsidiary"><option value="">- All -</option>${selOptsPairs(dropdowns.subsidiaries,filters.subsidiary)}</select>
     </div>
     <div class="pnd-fg"><label>From</label><input id="f-from" type="date" value="${escHtml(filters.from)}"></div>
     <div class="pnd-fg"><label>To</label><input id="f-to" type="date" value="${escHtml(filters.to)}"></div>
@@ -539,18 +533,16 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
 
   window.applyFilters = function() {
     var params = [];
-    var srch  = document.getElementById('f-search').value;
-    var brand = document.getElementById('f-brand').value;
-    var franc = document.getElementById('f-franc').value;
-    var week  = document.getElementById('f-week').value;
-    var from  = document.getElementById('f-from').value;
-    var to    = document.getElementById('f-to').value;
-    if (srch)  params.push('f_search=' + encodeURIComponent(srch));
-    if (brand) params.push('f_brand='  + encodeURIComponent(brand));
-    if (franc) params.push('f_franc='  + encodeURIComponent(franc));
-    if (week)  params.push('f_week='   + encodeURIComponent(week));
-    if (from)  params.push('f_from='   + encodeURIComponent(from));
-    if (to)    params.push('f_to='     + encodeURIComponent(to));
+    var srch      = document.getElementById('f-search').value;
+    var brand     = document.getElementById('f-brand').value;
+    var subsidiary= document.getElementById('f-subsidiary').value;
+    var from      = document.getElementById('f-from').value;
+    var to        = document.getElementById('f-to').value;
+    if (srch)       params.push('f_search='     + encodeURIComponent(srch));
+    if (brand)      params.push('f_brand='      + encodeURIComponent(brand));
+    if (subsidiary) params.push('f_subsidiary=' + encodeURIComponent(subsidiary));
+    if (from)       params.push('f_from='       + encodeURIComponent(from));
+    if (to)         params.push('f_to='         + encodeURIComponent(to));
     params.push('page=1');
     window.location.href = baseUrl + (params.length ? '&' + params.join('&') : '');
   };
