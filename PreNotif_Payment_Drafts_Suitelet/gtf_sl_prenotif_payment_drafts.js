@@ -35,6 +35,11 @@
  * Fix (2026-04-01f): All <button> elements must have type="button" to prevent
  *   NetSuite's outer form wrapper from treating them as submit buttons, which
  *   was stripping f_search and other custom URL params on Apply.
+ * Feat (2026-04-02): Three EFT detail columns added from
+ *   customrecord_2663_entity_bank_details joined on customer ID:
+ *   EFT Record Name (name), EFT Type (custrecord_2663_entity_bank_type),
+ *   EFT Payment File Format (custrecord_2663_entity_file_format).
+ *   Batched lookup via fetchBankDetails() — same pattern as fetchFirstLineItems.
  */
 
 define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
@@ -74,7 +79,10 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
         'Payment Amount',           // 13
         'Apply to Invoice ID',      // 14
         'For Electronic Payment',   // 15
-        'Undeposited Funds'         // 16
+        'Undeposited Funds',        // 16
+        'EFT Record Name',          // 17 ← customrecord_2663_entity_bank_details.name
+        'EFT Type',                 // 18 ← custrecord_2663_entity_bank_type display value
+        'EFT Payment File Format'   // 19 ← custrecord_2663_entity_file_format display value
     ];
 
     // Used for DATA_SELECT queries (columns + joins)
@@ -99,6 +107,7 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
     `;
 
     // Payment Note(Memo) is NULL here; fetchFirstLineItems() fills it in JS.
+    // EFT columns (17-19) are also NULL here; fetchBankDetails() fills them.
     const DATA_SELECT = `
         SELECT
             t.id                                                                AS "Internal ID",
@@ -322,6 +331,12 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
     // Data queries
     // -------------------------------------------------------------------------
 
+    /**
+     * Returns item.itemid for the first non-main, non-tax line of each
+     * transaction, falling back to tl.memo. Batched in BATCH_SIZE chunks.
+     * transactionline.id is per-transaction — JOIN back must include BOTH
+     * transaction AND id.
+     */
     const fetchFirstLineItems = (txnIds) => {
         if (!txnIds || txnIds.length === 0) return {};
         const map = {};
@@ -360,6 +375,59 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
         });
     };
 
+    /**
+     * Returns EFT bank detail fields for each customer from
+     * customrecord_2663_entity_bank_details, joined on custrecord_2663_parent_cust_ref.
+     * Only active records are included. Returns a map keyed by customer ID with
+     * { name, type, format } for columns 17, 18, 19 respectively.
+     * Batched in BATCH_SIZE chunks to avoid the 5,000-row runSuiteQL cap.
+     */
+    const fetchBankDetails = (customerIds) => {
+        if (!customerIds || customerIds.length === 0) return {};
+        const map       = {};
+        const uniqueIds = [...new Set(customerIds.map(String).filter(Boolean))];
+        for (let i = 0; i < uniqueIds.length; i += BATCH_SIZE) {
+            const idList = uniqueIds.slice(i, i + BATCH_SIZE).join(',');
+            const sql = `
+                SELECT ebd.custrecord_2663_parent_cust_ref                     AS cust_id,
+                       ebd.name                                                 AS eft_name,
+                       BUILTIN.DF(ebd.custrecord_2663_entity_bank_type)         AS eft_type,
+                       BUILTIN.DF(ebd.custrecord_2663_entity_file_format)       AS eft_format
+                FROM customrecord_2663_entity_bank_details ebd
+                WHERE ebd.custrecord_2663_parent_cust_ref IN (${idList})
+                  AND ebd.isinactive = 'F'
+                ORDER BY ebd.custrecord_2663_parent_cust_ref, ebd.id
+            `;
+            const rs = query.runSuiteQL({ query: sql });
+            (rs.results || []).forEach(row => {
+                const custId = String(row.values[0]);
+                // First active record per customer wins (ORDER BY id picks earliest)
+                if (!map[custId]) {
+                    map[custId] = {
+                        name  : row.values[1] || '',
+                        type  : row.values[2] || '',
+                        format: row.values[3] || ''
+                    };
+                }
+            });
+        }
+        return map;
+    };
+
+    const mergeBankDetails = (rows) => {
+        // Customer Internal ID is at index 3
+        const customerIds = rows.map(r => r[3]).filter(Boolean);
+        const map         = fetchBankDetails(customerIds);
+        return rows.map(r => {
+            const copy   = r.slice();
+            const detail = map[String(r[3])] || {};
+            copy[17] = detail.name   || '';
+            copy[18] = detail.type   || '';
+            copy[19] = detail.format || '';
+            return copy;
+        });
+    };
+
     const runPageQuery = (filteredIds, page) => {
         const start   = (page - 1) * PAGE_SIZE;
         const pageIds = filteredIds.slice(start, start + PAGE_SIZE);
@@ -368,7 +436,7 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
         const sql    = `${DATA_SELECT} ${BASE_FROM} WHERE t.id IN (${idList}) ORDER BY sub.externalid, t.trandate, t.id`;
         const rs     = query.runSuiteQL({ query: sql });
         const rows   = (rs.results || []).map(r => r.values);
-        return mergeFirstLineItems(rows);
+        return mergeBankDetails(mergeFirstLineItems(rows));
     };
 
     const runRowsByIds = (ids) => {
@@ -379,7 +447,7 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
             const rs     = query.runSuiteQL({ query: sql });
             (rs.results || []).forEach(r => results.push(r.values));
         }
-        return mergeFirstLineItems(results);
+        return mergeBankDetails(mergeFirstLineItems(results));
     };
 
     // -------------------------------------------------------------------------
