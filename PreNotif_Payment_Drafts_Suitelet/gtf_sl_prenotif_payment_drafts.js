@@ -22,8 +22,9 @@
  *   across all pages. Full filteredIds injected server-side as allFilteredIds.
  *   Header checkbox is PAGE-SCOPED only — does not trigger all-pages mode.
  * Fix (2026-04-02g): \n inside template literal string literals caused a JS
- *   syntax error that broke all buttons. Changed to \\n so the output HTML
- *   contains the correct backslash-n escape sequence.
+ *   syntax error that broke all buttons. Changed to \\n.
+ * Chore (2026-04-02h): Mark All / Unmark All buttons styled to match Apply
+ *   and Create Payment Drafts (pnd-apply blue).
  */
 
 define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
@@ -466,7 +467,6 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
   .pnd-export { background:#217346;color:#fff;border-color:#217346; } .pnd-export:hover { background:#185c38; }
   .pnd-create { background:#0d47a1;color:#fff;border-color:#0d47a1; }
   .pnd-create:not([disabled]):hover { background:#0a3580; } .pnd-create[disabled] { opacity:.45;cursor:not-allowed; }
-  .pnd-mark { background:#fff;color:#333;border-color:#aaa; } .pnd-mark:hover { background:#f0f4fb; }
   .pnd-count { color:#555;font-size:12px; }
   .pnd-pagination { display:flex;align-items:center;gap:4px;margin-left:auto; }
   .pg-btn,.pg-ellipsis { display:inline-block;padding:3px 8px;font-size:11px;border:1px solid #bbb;border-radius:3px;background:#fff;color:#333;text-decoration:none;line-height:1.4; }
@@ -527,8 +527,8 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
     <button type="button" id="pnd-create-btn" class="pnd-btn pnd-create" onclick="createSelectedPayments()" disabled>
       &#9654; Create Payment Drafts (0)
     </button>
-    <button type="button" class="pnd-btn pnd-mark" onclick="toggleAll(true)">&#9745; Mark All</button>
-    <button type="button" class="pnd-btn pnd-mark" onclick="toggleAll(false)">&#9744; Unmark All</button>
+    <button type="button" class="pnd-btn pnd-apply" onclick="toggleAll(true)">&#9745; Mark All</button>
+    <button type="button" class="pnd-btn pnd-apply" onclick="toggleAll(false)">&#9744; Unmark All</button>
     <span class="pnd-count">${countLabel}</span>
     <div class="pnd-pagination">
       ${prevUrl?`<a class="pg-btn pg-nav" href="${escHtml(prevUrl)}">&lsaquo; Prev</a>`:`<span class="pg-btn pg-nav" style="opacity:.4;cursor:default">&lsaquo; Prev</span>`}
