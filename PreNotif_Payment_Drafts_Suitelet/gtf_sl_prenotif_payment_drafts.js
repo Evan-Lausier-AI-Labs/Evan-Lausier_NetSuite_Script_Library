@@ -11,20 +11,13 @@
  * Fix (2026-03-31a): baseUrl fix. Fix (2026-03-31b/c): Invoice Memo / Payment Note.
  * Feat (2026-03-31d): Checkboxes + Create Payment Drafts. Fix (2026-04-01a-f): Various.
  * Feat (2026-04-02a): EFT columns from customrecord_2663_entity_bank_details.
- *   fetchBankDetails fetches Primary+Secondary per customer (data[17-21]).
- * Feat (2026-04-02b): EFT Type moved to display col 5 via COLUMN_DATA_INDICES.
- * Feat (2026-04-02c): EFT Type cell = inline per-row dropdown; ebd_ids POSTed
- *   with payment creation. Column 0 renamed "Invoice Internal ID".
- * Chore (2026-04-02d): Removed EFT Type and Store Number filter controls.
- * Chore (2026-04-02e): Master Franchisee → Subsidiary filter (sub.id);
- *   Week Ending Date filter removed.
- * Fix (2026-04-02f): Mark All / Unmark All buttons select/deselect ALL records
- *   across all pages. Full filteredIds injected server-side as allFilteredIds.
- *   Header checkbox is PAGE-SCOPED only — does not trigger all-pages mode.
- * Fix (2026-04-02g): \n inside template literal string literals caused a JS
- *   syntax error that broke all buttons. Changed to \\n.
- * Chore (2026-04-02h): Mark All / Unmark All buttons styled to match Apply
- *   and Create Payment Drafts (pnd-apply blue).
+ * Feat (2026-04-02b-c): EFT Type inline dropdown; ebd_ids POSTed with creation.
+ * Chore (2026-04-02d-e): Filter bar cleanup.
+ * Fix (2026-04-02f): Mark All selects all pages via allFilteredIds.
+ * Fix (2026-04-02g): \\n literal newline JS syntax error fixed.
+ * Chore (2026-04-02h): Mark All / Unmark All buttons styled blue (pnd-apply).
+ * Fix (2026-04-02i): Removed explicit undepfunds=false — NS rejects this when
+ *   a specific bank account is already set via the account field.
  */
 
 define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
@@ -48,7 +41,6 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
      * Raw data array layout after all merges (22 elements):
      *  [0-16]  SQL columns  [17] EFT Record Name (primary)  [18] EFT Type display
      *  [19] EFT File Format  [20] Primary EBD ID  [21] Secondary EBD ID
-     * COLUMN_DATA_INDICES: first 20 → COLUMNS display; last 2 → extra EBD metadata.
      */
     const COLUMNS = [
         'Invoice Internal ID',      // 0  → data[0]
@@ -364,7 +356,9 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
                 rec.setValue({fieldId:'tranid',value:row.paymentNumber});
                 rec.setValue({fieldId:'payment',value:parseFloat(row.paymentAmount)});
                 rec.setValue({fieldId:'custbody_9997_is_for_ep_dd',value:true});
-                rec.setValue({fieldId:'undepfunds',value:false});
+                // Note: undepfunds is NOT set explicitly — NS determines this
+                // automatically from the account field. Setting it to false
+                // throws "Invalid Field Value false" when a bank account is used.
                 const lineCount=rec.getLineCount({sublistId:'apply'});
                 let applied=false;
                 for (let i=0;i<lineCount;i++){
