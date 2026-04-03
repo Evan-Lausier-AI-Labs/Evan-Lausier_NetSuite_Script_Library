@@ -17,11 +17,13 @@
  * Fix (2026-04-02g): \\n literal newline JS syntax error fixed.
  * Chore (2026-04-02h): Mark All / Unmark All buttons styled blue (pnd-apply).
  * Fix (2026-04-02i): Removed explicit undepfunds=false.
- * Fix (2026-04-02j): Bank account sourced from customer's subsidiary (cs.custrecord4)
- *   rather than the transaction line's subsidiary. In dynamic mode, NS forces the
- *   payment subsidiary to the customer's home subsidiary, so the bank account must
- *   come from that same subsidiary. Both DATA_SELECT (display) and fetchCreateData
- *   (creation) now join JOIN subsidiary cs ON cs.id = c.subsidiary.
+ * Fix (2026-04-02j): DATA_SELECT display columns use customer subsidiary (cs) for
+ *   bank account fields (cs.custrecord4, cs.custrecord_gtf_bank_account_number).
+ * Fix (2026-04-02k): fetchCreateData reverted to invoice subsidiary (sub=tl.subsidiary,
+ *   sub.custrecord4) for payment creation. Setting subsidiary AFTER customer in dynamic
+ *   mode overrides NS's default, ensuring the apply sublist loads under the invoice's
+ *   subsidiary so the target invoice is found. Customer subsidiary (cs) is retained in
+ *   DATA_SELECT for display only.
  */
 
 define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
@@ -72,7 +74,7 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
     const COLUMN_DATA_INDICES = [0,1,2,3,4,18,5,6,7,8,9,10,11,12,13,14,15,16,17,19,20,21];
 
     // BASE_FROM joins both the transaction's subsidiary (sub, for Subsidiary External ID
-    // display) and the customer's subsidiary (cs, for bank account fields and payment creation).
+    // display) and the customer's subsidiary (cs, for bank account display columns).
     const BASE_FROM = `
         FROM transaction t
         JOIN transactionline tl ON tl.transaction = t.id AND tl.mainline = 'T' AND tl.taxline = 'F'
@@ -316,16 +318,16 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
         if (!txnIds||!txnIds.length) return [];
         const results=[];
         for (let i=0;i<txnIds.length;i+=BATCH_SIZE){
-            // Subsidiary and bank account come from the CUSTOMER's subsidiary (cs).
-            // In dynamic mode, NS forces payment subsidiary to the customer's home
-            // subsidiary — so the bank account must come from that same subsidiary.
-            const sql=`SELECT t.id,c.id,c.subsidiary,cs.custrecord4,a.id,t.currency,
+            // Use the invoice's own subsidiary (sub = tl.subsidiary) for both the payment
+            // subsidiary and the bank account. Setting subsidiary AFTER customer in dynamic
+            // mode overrides NS's default, so the apply sublist loads under the invoice's
+            // subsidiary and the invoice is found.
+            const sql=`SELECT t.id,c.id,sub.id,sub.custrecord4,a.id,t.currency,
                        sub.externalid||'-'||LPAD(TO_CHAR(t.id),10,'0'),t.memo,t.foreigntotal,TO_CHAR(t.trandate,'YYYY-MM-DD')
                 FROM transaction t
                 JOIN transactionline tl ON tl.transaction=t.id AND tl.mainline='T' AND tl.taxline='F'
                 JOIN customer c ON c.id=t.entity
                 JOIN subsidiary sub ON sub.id=tl.subsidiary
-                JOIN subsidiary cs ON cs.id=c.subsidiary
                 JOIN account a ON a.id=tl.expenseaccount
                 WHERE t.id IN(${txnIds.slice(i,i+BATCH_SIZE).join(',')})`;
             (query.runSuiteQL({query:sql}).results||[]).forEach(row=>{
@@ -351,11 +353,15 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
         const rows=fetchCreateData(ids), results=[];
         rows.forEach(row=>{
             try {
-                if (!row.bankAccountId) throw new Error('Bank account could not be resolved — verify GTF Bank Internal ID on customer subsidiary');
+                if (!row.bankAccountId) throw new Error('Bank account could not be resolved — verify GTF Bank Internal ID on subsidiary');
                 if (!row.arAccountId)   throw new Error('AR account could not be resolved');
                 const selectedEbdId=ebdByTxn[String(row.txnId)]||'';
                 log.debug({title:'createPayments',details:`Invoice ${row.txnId} — EBD ID: ${selectedEbdId}`});
                 const rec=record.create({type:record.Type.CUSTOMER_PAYMENT,isDynamic:true});
+                // Set customer first (NS defaults subsidiary to customer's home subsidiary),
+                // then immediately override subsidiary to the invoice's own subsidiary.
+                // This ensures the apply sublist loads under the invoice's subsidiary
+                // so the target invoice is found and applied.
                 rec.setValue({fieldId:'customer',value:parseInt(row.customerId)});
                 rec.setValue({fieldId:'subsidiary',value:parseInt(row.subsidiaryId)});
                 rec.setValue({fieldId:'account',value:parseInt(row.bankAccountId)});
