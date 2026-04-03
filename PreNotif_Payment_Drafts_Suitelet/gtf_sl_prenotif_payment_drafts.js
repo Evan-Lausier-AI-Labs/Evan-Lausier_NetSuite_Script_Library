@@ -18,15 +18,13 @@
  * Fix (2026-04-02f): Mark All selects all pages via allFilteredIds.
  * Fix (2026-04-02g): Fixed \\n literal newline JS syntax error.
  * Chore (2026-04-02h): Mark All / Unmark All styled blue.
- * Fix (2026-04-02i-o): Payment creation — final approach:
+ * Fix (2026-04-02i-p): Payment creation final approach:
  *   record.transform(INVOICE → CUSTOMER_PAYMENT, isDynamic:false) mirrors the
- *   UI "Accept Payment" button. NS pre-populates the apply sublist with the
- *   invoice already applied, handling subsidiary/account context automatically.
- *   undepfunds is set to false to switch from Undeposited Funds to Account mode.
- *   bankAccountId resolved via LEFT JOIN account ON account.externalid =
- *   cs.custrecord_gtf_bank_account_number — environment-independent.
- *   DATA_SELECT uses cs for bank account display columns; sub for Subsidiary
- *   External ID display.
+ *   UI "Accept Payment" button. NS pre-populates the apply sublist with the invoice
+ *   already applied. Setting account to a valid bank account switches from
+ *   Undeposited Funds to Account mode — undepfunds does NOT accept false in standard
+ *   mode and must not be explicitly set. bankAccountId resolved via LEFT JOIN
+ *   account ON account.externalid = cs.custrecord_gtf_bank_account_number.
  */
 
 define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
@@ -76,8 +74,6 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
 
     const COLUMN_DATA_INDICES = [0,1,2,3,4,18,5,6,7,8,9,10,11,12,13,14,15,16,17,19,20,21];
 
-    // BASE_FROM joins invoice subsidiary (sub) for display and customer subsidiary
-    // (cs) for bank account display columns that drive payment creation.
     const BASE_FROM = `
         FROM transaction t
         JOIN transactionline tl ON tl.transaction = t.id AND tl.mainline = 'T' AND tl.taxline = 'F'
@@ -94,8 +90,6 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
         JOIN subsidiary sub ON sub.id = tl.subsidiary
     `;
 
-    // Bank account display columns from CUSTOMER subsidiary (cs).
-    // Invoice subsidiary (sub) used for Subsidiary External ID only.
     const DATA_SELECT = `
         SELECT
             t.id                                                                AS "Invoice Internal ID",
@@ -373,9 +367,9 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
                     isDynamic: false
                 });
 
-                // Switch from Undeposited Funds (NS transform default) to Account mode,
-                // then set the bank account and remaining payment fields.
-                rec.setValue({fieldId:'undepfunds',value:false});
+                // Setting account to a valid bank account switches from Undeposited Funds
+                // to Account mode. Do NOT set undepfunds explicitly — it rejects false in
+                // standard (non-dynamic) mode.
                 rec.setValue({fieldId:'account',value:parseInt(row.bankAccountId)});
                 rec.setValue({fieldId:'aracct',value:parseInt(row.arAccountId)});
                 rec.setValue({fieldId:'trandate',value:new Date(row.tranDate+'T00:00:00')});
