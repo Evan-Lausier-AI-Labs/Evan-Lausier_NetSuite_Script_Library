@@ -8,19 +8,18 @@
  * Script ID:    customscript_gtf_sl_prenotif_drafts
  * Deploy ID:    customdeploy_store_level_payment_draft
  *
- * Fix (2026-04-02i-r): Payment creation:
+ * Fix (2026-04-02i-r): Payment creation fixes:
  *   - record.transform(INVOICE -> CUSTOMER_PAYMENT, isDynamic:false)
  *   - Bank account from INVOICE subsidiary (sub.custrecord_gtf_bank_account_number)
- *   - Setting account switches from Undeposited Funds to Account mode
+ *   - After transform, explicitly set apply=true + amount on invoice line in apply sublist
+ *   - Setting account field switches from Undeposited Funds to Account mode
  *   - Do NOT set undepfunds (rejects false in standard mode)
  *   - tranid cannot be overridden on Customer Payment; externalid is set correctly
- * Fix (2026-04-02s): Correct SAVED_SEARCHES labels:
- *   - customsearch_gtf_prenotif_child_custom_8 = Parent Level
- *   - customsearch_gtf_prenotif_child_custom_5 = Store Level
- * Fix (2026-04-02t): Apply sublist: explicitly set apply=true + amount after transform;
- *   transform populates the sublist but does NOT check apply in standard mode.
- *   Set both custbody_9997_is_for_ep_eft (UI "FOR ELECTRONIC BANK PAYMENT" checkbox)
- *   and custbody_9997_is_for_ep_dd (Direct Debit flag) on each payment.
+ * Fix (2026-04-02s-t): Both EP flags set (custbody_9997_is_for_ep_eft + _dd);
+ *   apply sublist explicitly checked after transform.
+ * Fix (2026-04-02u): SAVED_SEARCHES corrected for Production:
+ *   - _8 = Store Level, _5 = Parent Level in Production
+ *   - _8 = Parent Level, _5 = Store Level in SB2 (environment inconsistency)
  */
 
 define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
@@ -30,9 +29,12 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
     const BATCH_SIZE = 500;
     const MAX_CREATE = 200;
 
+    // NOTE: saved search IDs are swapped between SB2 and Production.
+    // Production: _8 = Store Level, _5 = Parent Level (correct below).
+    // SB2:        _8 = Parent Level, _5 = Store Level (environment inconsistency).
     const SAVED_SEARCHES = [
-        { id: 'customsearch_gtf_prenotif_child_custom_8', label: 'Payment Drafts - Parent Level' },
-        { id: 'customsearch_gtf_prenotif_child_custom_5', label: 'Payment Drafts - Store Level'  }
+        { id: 'customsearch_gtf_prenotif_child_custom_8', label: 'Payment Drafts - Store Level'  },
+        { id: 'customsearch_gtf_prenotif_child_custom_5', label: 'Payment Drafts - Parent Level' }
     ];
 
     const EFT_TYPES = [
