@@ -18,18 +18,15 @@
  * Fix (2026-04-02f): Mark All selects all pages via allFilteredIds.
  * Fix (2026-04-02g): Fixed \\n literal newline JS syntax error.
  * Chore (2026-04-02h): Mark All / Unmark All styled blue.
- * Fix (2026-04-02i): Removed explicit undepfunds=false.
- * Fix (2026-04-02j-n): Payment creation — final approach:
- *   - isDynamic:false matches CSV import behavior, bypassing UI-level
- *     account/subsidiary dropdown filtering that rejects cross-subsidiary
- *     bank accounts (e.g. Moe's LLC bank on a Moe's SPV payment).
- *   - subsidiaryId = invoice subsidiary (sub = tl.subsidiary).
- *   - bankAccountId = GL account resolved via LEFT JOIN account ON
- *     account.externalid = cs.custrecord_gtf_bank_account_number.
- *     Environment-independent. cs.custrecord4 is NOT the GL account ID.
- *   - sublist: setSublistValue (no selectLine/commitLine in standard mode).
- *   - DATA_SELECT uses cs for bank account display columns; sub for
- *     Subsidiary External ID display.
+ * Fix (2026-04-02i-o): Payment creation — final approach:
+ *   record.transform(INVOICE → CUSTOMER_PAYMENT, isDynamic:false) mirrors the
+ *   UI "Accept Payment" button. NS pre-populates the apply sublist with the
+ *   invoice already applied, handling subsidiary/account context automatically.
+ *   undepfunds is set to false to switch from Undeposited Funds to Account mode.
+ *   bankAccountId resolved via LEFT JOIN account ON account.externalid =
+ *   cs.custrecord_gtf_bank_account_number — environment-independent.
+ *   DATA_SELECT uses cs for bank account display columns; sub for Subsidiary
+ *   External ID display.
  */
 
 define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
@@ -326,11 +323,8 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
         if (!txnIds||!txnIds.length) return [];
         const results=[];
         for (let i=0;i<txnIds.length;i+=BATCH_SIZE){
-            // subsidiaryId  = invoice subsidiary (sub = tl.subsidiary)
-            // bankAccountId = GL account resolved via account.externalid =
-            //                 cs.custrecord_gtf_bank_account_number (Bank Account
-            //                 External ID from the row, e.g. "1001").
-            //                 Environment-independent. cs.custrecord4 is NOT the GL account ID.
+            // bankAccountId resolved via account.externalid = cs.custrecord_gtf_bank_account_number.
+            // Environment-independent — resolves correct internal ID from the external ID shown in the row.
             const sql=`SELECT t.id,c.id,sub.id,bank_acct.id,a.id,t.currency,
                        sub.externalid||'-'||LPAD(TO_CHAR(t.id),10,'0'),t.memo,t.foreigntotal,TO_CHAR(t.trandate,'YYYY-MM-DD')
                 FROM transaction t
@@ -368,30 +362,39 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
                 if (!row.arAccountId)   throw new Error('AR account could not be resolved');
                 const selectedEbdId=ebdByTxn[String(row.txnId)]||'';
                 log.debug({title:'createPayments',details:`Invoice ${row.txnId} — sub: ${row.subsidiaryId}, acct: ${row.bankAccountId}, EBD: ${selectedEbdId}`});
-                const rec=record.create({type:record.Type.CUSTOMER_PAYMENT,isDynamic:false});
-                // isDynamic:false matches CSV import behavior — bypasses UI account/subsidiary
-                // dropdown filtering that rejects cross-subsidiary bank accounts.
-                rec.setValue({fieldId:'customer',value:parseInt(row.customerId)});
-                rec.setValue({fieldId:'subsidiary',value:parseInt(row.subsidiaryId)});
+
+                // Transform invoice → Customer Payment (mirrors the UI "Accept Payment" button).
+                // NS pre-populates the apply sublist with the invoice already applied,
+                // handling subsidiary/account context automatically.
+                const rec=record.transform({
+                    fromType:  record.Type.INVOICE,
+                    fromId:    parseInt(row.txnId),
+                    toType:    record.Type.CUSTOMER_PAYMENT,
+                    isDynamic: false
+                });
+
+                // Switch from Undeposited Funds (NS transform default) to Account mode,
+                // then set the bank account and remaining payment fields.
+                rec.setValue({fieldId:'undepfunds',value:false});
                 rec.setValue({fieldId:'account',value:parseInt(row.bankAccountId)});
                 rec.setValue({fieldId:'aracct',value:parseInt(row.arAccountId)});
-                rec.setValue({fieldId:'currency',value:parseInt(row.currencyId)});
                 rec.setValue({fieldId:'trandate',value:new Date(row.tranDate+'T00:00:00')});
                 rec.setValue({fieldId:'memo',value:row.memo||''});
                 rec.setValue({fieldId:'externalid',value:row.paymentNumber});
                 rec.setValue({fieldId:'tranid',value:row.paymentNumber});
                 rec.setValue({fieldId:'payment',value:parseFloat(row.paymentAmount)});
                 rec.setValue({fieldId:'custbody_9997_is_for_ep_dd',value:true});
+
+                // Verify the invoice is in the apply sublist (transform should pre-apply it).
                 const lineCount=rec.getLineCount({sublistId:'apply'});
                 let applied=false;
                 for (let i=0;i<lineCount;i++){
                     if (Number(rec.getSublistValue({sublistId:'apply',fieldId:'doc',line:i}))===Number(row.txnId)){
-                        rec.setSublistValue({sublistId:'apply',fieldId:'apply',line:i,value:true});
-                        rec.setSublistValue({sublistId:'apply',fieldId:'amount',line:i,value:parseFloat(row.paymentAmount)});
                         applied=true; break;
                     }
                 }
-                if (!applied) throw new Error(`Invoice ${row.txnId} not found in apply sublist.`);
+                if (!applied) throw new Error(`Invoice ${row.txnId} not found in apply sublist after transform.`);
+
                 const newId=rec.save();
                 results.push({label:row.txnId,detail:row.paymentNumber,success:true,link:`/app/accounting/transactions/custpymt.nl?id=${newId}`,linkLabel:`CUSTPYMT ${newId}`});
             } catch(e){
