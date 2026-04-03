@@ -18,13 +18,14 @@
  * Fix (2026-04-02f): Mark All selects all pages via allFilteredIds.
  * Fix (2026-04-02g): Fixed \\n literal newline JS syntax error.
  * Chore (2026-04-02h): Mark All / Unmark All styled blue.
- * Fix (2026-04-02i-p): Payment creation final approach:
- *   record.transform(INVOICE → CUSTOMER_PAYMENT, isDynamic:false) mirrors the
- *   UI "Accept Payment" button. NS pre-populates the apply sublist with the invoice
- *   already applied. Setting account to a valid bank account switches from
- *   Undeposited Funds to Account mode — undepfunds does NOT accept false in standard
- *   mode and must not be explicitly set. bankAccountId resolved via LEFT JOIN
- *   account ON account.externalid = cs.custrecord_gtf_bank_account_number.
+ * Fix (2026-04-02i-q): Payment creation final approach:
+ *   record.transform(INVOICE -> CUSTOMER_PAYMENT, isDynamic:false) mirrors
+ *   the UI Accept Payment button. Setting account switches from Undeposited
+ *   Funds to Account mode (undepfunds must NOT be set in standard mode).
+ *   Bank account sourced from INVOICE subsidiary (sub = tl.subsidiary) via
+ *   LEFT JOIN account ON account.externalid = sub.custrecord_gtf_bank_account_number.
+ *   This matches existing production payments (e.g. Moe's SPV uses 100203,
+ *   not 1001 from the customer's Moe's LLC subsidiary).
  */
 
 define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
@@ -50,36 +51,38 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
      *  [19] EFT File Format  [20] Primary EBD ID  [21] Secondary EBD ID
      */
     const COLUMNS = [
-        'Invoice Internal ID',      // 0  → data[0]
-        'Add Payment Number',       // 1  → data[1]
-        'Payment Preference',       // 2  → data[2]
-        'Customer Internal ID',     // 3  → data[3]
-        'Subsidiary External ID',   // 4  → data[4]  ← invoice subsidiary (sub)
-        'EFT Type',                 // 5  → data[18] ← inline dropdown
-        'Bank Account to Draft',    // 6  → data[5]  ← customer subsidiary (cs)
-        'Date',                     // 7  → data[6]
-        'Invoice Memo',             // 8  → data[7]
-        'AR Account External ID',   // 9  → data[8]
-        'Payment Note(Memo)',       // 10 → data[9]
-        'Bank Account External ID', // 11 → data[10] ← customer subsidiary (cs)
-        'GTF Bank Internal ID',     // 12 → data[11] ← customer subsidiary (cs)
-        'Currency',                 // 13 → data[12]
-        'Payment Amount',           // 14 → data[13]
-        'Apply to Invoice ID',      // 15 → data[14]
-        'For Electronic Payment',   // 16 → data[15]
-        'Undeposited Funds',        // 17 → data[16]
-        'EFT Record Name',          // 18 → data[17]
-        'EFT Payment File Format'   // 19 → data[19]
+        'Invoice Internal ID',      // 0  -> data[0]
+        'Add Payment Number',       // 1  -> data[1]
+        'Payment Preference',       // 2  -> data[2]
+        'Customer Internal ID',     // 3  -> data[3]
+        'Subsidiary External ID',   // 4  -> data[4]  <- invoice subsidiary (sub)
+        'EFT Type',                 // 5  -> data[18] <- inline dropdown
+        'Bank Account to Draft',    // 6  -> data[5]  <- invoice subsidiary (sub)
+        'Date',                     // 7  -> data[6]
+        'Invoice Memo',             // 8  -> data[7]
+        'AR Account External ID',   // 9  -> data[8]
+        'Payment Note(Memo)',       // 10 -> data[9]
+        'Bank Account External ID', // 11 -> data[10] <- invoice subsidiary (sub)
+        'GTF Bank Internal ID',     // 12 -> data[11] <- invoice subsidiary (sub)
+        'Currency',                 // 13 -> data[12]
+        'Payment Amount',           // 14 -> data[13]
+        'Apply to Invoice ID',      // 15 -> data[14]
+        'For Electronic Payment',   // 16 -> data[15]
+        'Undeposited Funds',        // 17 -> data[16]
+        'EFT Record Name',          // 18 -> data[17]
+        'EFT Payment File Format'   // 19 -> data[19]
     ];
 
     const COLUMN_DATA_INDICES = [0,1,2,3,4,18,5,6,7,8,9,10,11,12,13,14,15,16,17,19,20,21];
 
+    // BASE_FROM uses the invoice's own subsidiary (sub = tl.subsidiary) for ALL
+    // bank account fields. This matches what existing production payments use:
+    // the bank account is on the invoice subsidiary record, not the customer's.
     const BASE_FROM = `
         FROM transaction t
         JOIN transactionline tl ON tl.transaction = t.id AND tl.mainline = 'T' AND tl.taxline = 'F'
         JOIN customer   c   ON c.id   = t.entity
         JOIN subsidiary sub ON sub.id = tl.subsidiary
-        JOIN subsidiary cs  ON cs.id  = c.subsidiary
         JOIN account    a   ON a.id   = tl.expenseaccount
     `;
 
@@ -90,6 +93,10 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
         JOIN subsidiary sub ON sub.id = tl.subsidiary
     `;
 
+    // Bank account fields from the INVOICE's subsidiary (sub = tl.subsidiary).
+    // sub.custrecord_gtf_bank_account_number is the bank account external ID
+    // (e.g. '100203' for Moe's SPV), which resolves to the correct GL account
+    // for that subsidiary. This aligns with existing production payment records.
     const DATA_SELECT = `
         SELECT
             t.id                                                                AS "Invoice Internal ID",
@@ -97,13 +104,13 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
             BUILTIN.DF(c.custentity_gtf_payment_preference)                    AS "Payment Preference",
             c.id                                                                AS "Customer Internal ID",
             sub.externalid                                                      AS "Subsidiary External ID",
-            cs.custrecord_gtf_bank_account_number                               AS "Bank Account to Draft",
+            sub.custrecord_gtf_bank_account_number                              AS "Bank Account to Draft",
             TO_CHAR(t.trandate, 'MM/DD/YYYY')                                  AS "Date",
             t.memo                                                              AS "Invoice Memo",
             a.externalid                                                        AS "AR Account External ID",
             NULL                                                                AS "Payment Note(Memo)",
-            cs.custrecord_gtf_bank_account_number                               AS "Bank Account External ID",
-            cs.custrecord4                                                       AS "GTF Bank Internal ID",
+            sub.custrecord_gtf_bank_account_number                              AS "Bank Account External ID",
+            sub.custrecord4                                                      AS "GTF Bank Internal ID",
             BUILTIN.DF(t.currency)                                              AS "Currency",
             REPLACE(TO_CHAR(t.foreigntotal), ',', '')                          AS "Payment Amount",
             t.id                                                                AS "Apply to Invoice ID",
@@ -317,18 +324,21 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
         if (!txnIds||!txnIds.length) return [];
         const results=[];
         for (let i=0;i<txnIds.length;i+=BATCH_SIZE){
-            // bankAccountId resolved via account.externalid = cs.custrecord_gtf_bank_account_number.
-            // Environment-independent — resolves correct internal ID from the external ID shown in the row.
+            // bankAccountId = GL account resolved via LEFT JOIN account ON
+            // account.externalid = sub.custrecord_gtf_bank_account_number.
+            // Uses the INVOICE's subsidiary (sub = tl.subsidiary), not the customer's.
+            // This matches existing production payment records (e.g. Moe's SPV invoices
+            // use account '100203', which is on the Moe's SPV subsidiary record, not
+            // '1001' from Moe's LLC). Environment-independent via externalid join.
             const sql=`SELECT t.id,c.id,sub.id,bank_acct.id,a.id,t.currency,
                        sub.externalid||'-'||LPAD(TO_CHAR(t.id),10,'0'),t.memo,t.foreigntotal,TO_CHAR(t.trandate,'YYYY-MM-DD')
                 FROM transaction t
                 JOIN transactionline tl ON tl.transaction=t.id AND tl.mainline='T' AND tl.taxline='F'
                 JOIN customer c ON c.id=t.entity
                 JOIN subsidiary sub ON sub.id=tl.subsidiary
-                JOIN subsidiary cs ON cs.id=c.subsidiary
-                LEFT JOIN account bank_acct ON bank_acct.externalid=cs.custrecord_gtf_bank_account_number
+                LEFT JOIN account bank_acct ON bank_acct.externalid=sub.custrecord_gtf_bank_account_number
                 JOIN account a ON a.id=tl.expenseaccount
-                WHERE t.id IN(${txnIds.slice(i,i+BATCH_SIZE).join(',')})`;
+                WHERE t.id IN(${txnIds.slice(i,i+BATCH_SIZE).join(',')})`);
             (query.runSuiteQL({query:sql}).results||[]).forEach(row=>{
                 results.push({txnId:row.values[0],customerId:row.values[1],subsidiaryId:row.values[2],
                     bankAccountId:row.values[3],arAccountId:row.values[4],currencyId:row.values[5],
@@ -352,12 +362,12 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
         const rows=fetchCreateData(ids), results=[];
         rows.forEach(row=>{
             try {
-                if (!row.bankAccountId) throw new Error('Bank account could not be resolved — verify Bank Account External ID on customer subsidiary');
+                if (!row.bankAccountId) throw new Error('Bank account could not be resolved — verify Bank Account External ID on invoice subsidiary');
                 if (!row.arAccountId)   throw new Error('AR account could not be resolved');
                 const selectedEbdId=ebdByTxn[String(row.txnId)]||'';
                 log.debug({title:'createPayments',details:`Invoice ${row.txnId} — sub: ${row.subsidiaryId}, acct: ${row.bankAccountId}, EBD: ${selectedEbdId}`});
 
-                // Transform invoice → Customer Payment (mirrors the UI "Accept Payment" button).
+                // Transform invoice -> Customer Payment (mirrors the UI Accept Payment button).
                 // NS pre-populates the apply sublist with the invoice already applied,
                 // handling subsidiary/account context automatically.
                 const rec=record.transform({
@@ -461,7 +471,7 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
         }).join('\n');
         const start=(page-1)*PAGE_SIZE+1, end=Math.min(page*PAGE_SIZE,total);
         const prevUrl=page>1?buildUrl({page:page-1}):'', nextUrl=page<totalPages?buildUrl({page:page+1}):'';
-        const pageButtons=(()=>{if(totalPages<=1)return'';let h='';const r=2;for(let p=1;p<=totalPages;p++){if(p===1||p===totalPages||(p>=page-r&&p<=page+r)){h+=p===page?`<span class="pg-btn pg-active">${p}</span>`:`<a class="pg-btn" href="${buildUrl({page:p})}">${p}</a>`;}else if(p===page-r-1||p===page+r+1){h+=`<span class="pg-ellipsis">…</span>`;}}return h;})();
+        const pageButtons=(()=>{if(totalPages<=1)return'';let h='';const r=2;for(let p=1;p<=totalPages;p++){if(p===1||p===totalPages||(p>=page-r&&p<=page+r)){h+=p===page?`<span class="pg-btn pg-active">${p}</span>`:`<a class="pg-btn" href="${buildUrl({page:p})}">${p}</a>`;}else if(p===page-r-1||p===page+r+1){h+=`<span class="pg-ellipsis">...</span>`;}}return h;})();
         const countLabel=total+' record'+(total!==1?'s':'')+(total>0?' &nbsp;|&nbsp; Showing '+start+'&ndash;'+end:'');
 
         return `
