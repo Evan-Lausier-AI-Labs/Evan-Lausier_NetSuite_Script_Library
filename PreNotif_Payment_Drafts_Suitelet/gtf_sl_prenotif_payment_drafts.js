@@ -8,24 +8,19 @@
  * Script ID:    customscript_gtf_sl_prenotif_drafts
  * Deploy ID:    customdeploy_store_level_payment_draft
  *
- * Fix (2026-03-31a): baseUrl fix.
- * Fix (2026-03-31b/c): Invoice Memo / Payment Note(Memo) sourcing.
- * Feat (2026-03-31d): Per-row checkboxes + Create Payment Drafts button.
- * Fix (2026-04-01a-f): Various filter, URL, and display fixes.
- * Feat (2026-04-02a): EFT columns from customrecord_2663_entity_bank_details.
- * Feat (2026-04-02b-c): EFT Type inline per-row dropdown; ebd_ids POSTed with creation.
- * Chore (2026-04-02d-e): Filter bar cleanup; Subsidiary filter.
- * Fix (2026-04-02f): Mark All selects all pages via allFilteredIds.
- * Fix (2026-04-02g): Fixed \\n literal newline JS syntax error.
- * Chore (2026-04-02h): Mark All / Unmark All styled blue.
- * Fix (2026-04-02i-q): Payment creation final approach:
- *   record.transform(INVOICE -> CUSTOMER_PAYMENT, isDynamic:false) mirrors
- *   the UI Accept Payment button. Setting account switches from Undeposited
- *   Funds to Account mode (undepfunds must NOT be set in standard mode).
- *   Bank account sourced from INVOICE subsidiary (sub = tl.subsidiary) via
- *   LEFT JOIN account ON account.externalid = sub.custrecord_gtf_bank_account_number.
- *   This matches existing production payments (e.g. Moe's SPV uses 100203,
- *   not 1001 from the customer's Moe's LLC subsidiary).
+ * Fix (2026-04-02i-r): Payment creation:
+ *   - record.transform(INVOICE -> CUSTOMER_PAYMENT, isDynamic:false)
+ *   - Bank account from INVOICE subsidiary (sub.custrecord_gtf_bank_account_number)
+ *   - Setting account switches from Undeposited Funds to Account mode
+ *   - Do NOT set undepfunds (rejects false in standard mode)
+ *   - tranid cannot be overridden on Customer Payment; externalid is set correctly
+ * Fix (2026-04-02s): Correct SAVED_SEARCHES labels:
+ *   - customsearch_gtf_prenotif_child_custom_8 = Parent Level
+ *   - customsearch_gtf_prenotif_child_custom_5 = Store Level
+ * Fix (2026-04-02t): Apply sublist: explicitly set apply=true + amount after transform;
+ *   transform populates the sublist but does NOT check apply in standard mode.
+ *   Set both custbody_9997_is_for_ep_eft (UI "FOR ELECTRONIC BANK PAYMENT" checkbox)
+ *   and custbody_9997_is_for_ep_dd (Direct Debit flag) on each payment.
  */
 
 define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
@@ -36,8 +31,8 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
     const MAX_CREATE = 200;
 
     const SAVED_SEARCHES = [
-        { id: 'customsearch_gtf_prenotif_child_custom_8', label: 'Payment Drafts - Store Level' },
-        { id: 'customsearch_gtf_prenotif_child_custom_5', label: 'Payment Drafts - Parent Level' }
+        { id: 'customsearch_gtf_prenotif_child_custom_8', label: 'Payment Drafts - Parent Level' },
+        { id: 'customsearch_gtf_prenotif_child_custom_5', label: 'Payment Drafts - Store Level'  }
     ];
 
     const EFT_TYPES = [
@@ -55,15 +50,15 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
         'Add Payment Number',       // 1  -> data[1]
         'Payment Preference',       // 2  -> data[2]
         'Customer Internal ID',     // 3  -> data[3]
-        'Subsidiary External ID',   // 4  -> data[4]  <- invoice subsidiary (sub)
+        'Subsidiary External ID',   // 4  -> data[4]
         'EFT Type',                 // 5  -> data[18] <- inline dropdown
-        'Bank Account to Draft',    // 6  -> data[5]  <- invoice subsidiary (sub)
+        'Bank Account to Draft',    // 6  -> data[5]
         'Date',                     // 7  -> data[6]
         'Invoice Memo',             // 8  -> data[7]
         'AR Account External ID',   // 9  -> data[8]
         'Payment Note(Memo)',       // 10 -> data[9]
-        'Bank Account External ID', // 11 -> data[10] <- invoice subsidiary (sub)
-        'GTF Bank Internal ID',     // 12 -> data[11] <- invoice subsidiary (sub)
+        'Bank Account External ID', // 11 -> data[10]
+        'GTF Bank Internal ID',     // 12 -> data[11]
         'Currency',                 // 13 -> data[12]
         'Payment Amount',           // 14 -> data[13]
         'Apply to Invoice ID',      // 15 -> data[14]
@@ -95,7 +90,7 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
 
     // Bank account fields from the INVOICE's subsidiary (sub = tl.subsidiary).
     // sub.custrecord_gtf_bank_account_number is the bank account external ID
-    // (e.g. '100203' for Moe's SPV), which resolves to the correct GL account
+    // (e.g. "100203" for Moe's SPV), which resolves to the correct GL account
     // for that subsidiary. This aligns with existing production payment records.
     const DATA_SELECT = `
         SELECT
@@ -328,8 +323,8 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
             // account.externalid = sub.custrecord_gtf_bank_account_number.
             // Uses the INVOICE's subsidiary (sub = tl.subsidiary), not the customer's.
             // This matches existing production payment records (e.g. Moe's SPV invoices
-            // use account '100203', which is on the Moe's SPV subsidiary record, not
-            // '1001' from Moe's LLC). Environment-independent via externalid join.
+            // use account "100203", which is on the Moe's SPV subsidiary record, not "1001"
+            // from Moe's LLC). Environment-independent via externalid join.
             const sql=`SELECT t.id,c.id,sub.id,bank_acct.id,a.id,t.currency,
                        sub.externalid||'-'||LPAD(TO_CHAR(t.id),10,'0'),t.memo,t.foreigntotal,TO_CHAR(t.trandate,'YYYY-MM-DD')
                 FROM transaction t
@@ -338,7 +333,7 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
                 JOIN subsidiary sub ON sub.id=tl.subsidiary
                 LEFT JOIN account bank_acct ON bank_acct.externalid=sub.custrecord_gtf_bank_account_number
                 JOIN account a ON a.id=tl.expenseaccount
-                WHERE t.id IN(${txnIds.slice(i,i+BATCH_SIZE).join(',')})`);
+                WHERE t.id IN(${txnIds.slice(i,i+BATCH_SIZE).join(',')})`;
             (query.runSuiteQL({query:sql}).results||[]).forEach(row=>{
                 results.push({txnId:row.values[0],customerId:row.values[1],subsidiaryId:row.values[2],
                     bankAccountId:row.values[3],arAccountId:row.values[4],currencyId:row.values[5],
@@ -362,14 +357,14 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
         const rows=fetchCreateData(ids), results=[];
         rows.forEach(row=>{
             try {
-                if (!row.bankAccountId) throw new Error('Bank account could not be resolved — verify Bank Account External ID on invoice subsidiary');
+                if (!row.bankAccountId) throw new Error('Bank account could not be resolved — verify custrecord_gtf_bank_account_number on invoice subsidiary');
                 if (!row.arAccountId)   throw new Error('AR account could not be resolved');
                 const selectedEbdId=ebdByTxn[String(row.txnId)]||'';
                 log.debug({title:'createPayments',details:`Invoice ${row.txnId} — sub: ${row.subsidiaryId}, acct: ${row.bankAccountId}, EBD: ${selectedEbdId}`});
 
-                // Transform invoice -> Customer Payment (mirrors the UI Accept Payment button).
-                // NS pre-populates the apply sublist with the invoice already applied,
-                // handling subsidiary/account context automatically.
+                // Transform invoice -> Customer Payment (mirrors the UI "Accept Payment" button).
+                // NS pre-populates the apply sublist with the invoice already in it,
+                // but does NOT check the apply checkbox in standard (non-dynamic) mode.
                 const rec=record.transform({
                     fromType:  record.Type.INVOICE,
                     fromId:    parseInt(row.txnId),
@@ -385,15 +380,19 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
                 rec.setValue({fieldId:'trandate',value:new Date(row.tranDate+'T00:00:00')});
                 rec.setValue({fieldId:'memo',value:row.memo||''});
                 rec.setValue({fieldId:'externalid',value:row.paymentNumber});
-                rec.setValue({fieldId:'tranid',value:row.paymentNumber});
                 rec.setValue({fieldId:'payment',value:parseFloat(row.paymentAmount)});
-                rec.setValue({fieldId:'custbody_9997_is_for_ep_dd',value:true});
+                rec.setValue({fieldId:'custbody_9997_is_for_ep_eft',value:true}); // UI "FOR ELECTRONIC BANK PAYMENT" checkbox — Payment Manager pickup
+                rec.setValue({fieldId:'custbody_9997_is_for_ep_dd',value:true});  // "For Electronic Bank Payment (Direct Debit)"
 
-                // Verify the invoice is in the apply sublist (transform should pre-apply it).
+                // Find the invoice in the apply sublist and explicitly mark it applied.
+                // transform populates the sublist but does NOT check the apply checkbox
+                // in standard mode — must be set explicitly or the payment saves unapplied.
                 const lineCount=rec.getLineCount({sublistId:'apply'});
                 let applied=false;
                 for (let i=0;i<lineCount;i++){
                     if (Number(rec.getSublistValue({sublistId:'apply',fieldId:'doc',line:i}))===Number(row.txnId)){
+                        rec.setSublistValue({sublistId:'apply',fieldId:'apply',line:i,value:true});
+                        rec.setSublistValue({sublistId:'apply',fieldId:'amount',line:i,value:parseFloat(row.paymentAmount)});
                         applied=true; break;
                     }
                 }
@@ -455,7 +454,7 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
         const exportUrl=buildUrl({export:'1',page:''});
         const selOptsSavedSearches=`<option value=""${!filters.search?' selected':''}>-- Select a Search --</option>`+SAVED_SEARCHES.map(s=>`<option value="${escHtml(s.id)}"${s.id===filters.search?' selected':''}>${escHtml(s.label)}</option>`).join('');
         const selOptsPairs=(pairs,sel)=>pairs.map(p=>`<option value="${escHtml(p.id)}"${String(p.id)===String(sel)?' selected':''}>${escHtml(p.name)}</option>`).join('');
-        const thCells=`<th style="width:32px;text-align:center"><input type="checkbox" id="pnd-check-all" title="Select/deselect current page"></th>`+COLUMNS.map(c=>`<th>${escHtml(c)}</th>`).join('');
+        const thCells=`<th style="width:32px;text-align:center"><input type="checkbox" id="pnd-check-all"></th>`+COLUMNS.map(c=>`<th>${escHtml(c)}</th>`).join('');
         const trRows=rows.map(row=>{
             const id=row[0]==null?'':String(row[0]);
             const primaryEbdId=row[20]!=null?String(row[20]):'';
@@ -471,7 +470,7 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
         }).join('\n');
         const start=(page-1)*PAGE_SIZE+1, end=Math.min(page*PAGE_SIZE,total);
         const prevUrl=page>1?buildUrl({page:page-1}):'', nextUrl=page<totalPages?buildUrl({page:page+1}):'';
-        const pageButtons=(()=>{if(totalPages<=1)return'';let h='';const r=2;for(let p=1;p<=totalPages;p++){if(p===1||p===totalPages||(p>=page-r&&p<=page+r)){h+=p===page?`<span class="pg-btn pg-active">${p}</span>`:`<a class="pg-btn" href="${buildUrl({page:p})}">${p}</a>`;}else if(p===page-r-1||p===page+r+1){h+=`<span class="pg-ellipsis">...</span>`;}}return h;})();
+        const pageButtons=(()=>{if(totalPages<=1)return'';let h='';const r=2;for(let p=1;p<=totalPages;p++){if(p===1||p===totalPages||(p>=page-r&&p<=page+r)){h+=p===page?`<span class="pg-btn pg-active">${p}</span>`:`<a class="pg-btn" href="${buildUrl({page:p})}">${p}</a>`;}else if(p===page-r-1||p===page+r+1){h+=`<span class="pg-ellipsis">…</span>`;}}return h;})();
         const countLabel=total+' record'+(total!==1?'s':'')+(total>0?' &nbsp;|&nbsp; Showing '+start+'&ndash;'+end:'');
 
         return `
@@ -490,6 +489,7 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
   .pnd-export { background:#217346;color:#fff;border-color:#217346; } .pnd-export:hover { background:#185c38; }
   .pnd-create { background:#0d47a1;color:#fff;border-color:#0d47a1; }
   .pnd-create:not([disabled]):hover { background:#0a3580; } .pnd-create[disabled] { opacity:.45;cursor:not-allowed; }
+  .pnd-mark { background:#fff;color:#333;border-color:#aaa; } .pnd-mark:hover { background:#f0f4fb; }
   .pnd-count { color:#555;font-size:12px; }
   .pnd-pagination { display:flex;align-items:center;gap:4px;margin-left:auto; }
   .pg-btn,.pg-ellipsis { display:inline-block;padding:3px 8px;font-size:11px;border:1px solid #bbb;border-radius:3px;background:#fff;color:#333;text-decoration:none;line-height:1.4; }
@@ -525,7 +525,6 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
     <span id="pnd-all-pages-msg"></span>
     <button type="button" onclick="toggleAll(false)">Clear selection</button>
   </div>
-
   <div class="pnd-filters">
     <div class="pnd-fg">
       <label>Saved Search</label>
@@ -550,8 +549,8 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
     <button type="button" id="pnd-create-btn" class="pnd-btn pnd-create" onclick="createSelectedPayments()" disabled>
       &#9654; Create Payment Drafts (0)
     </button>
-    <button type="button" class="pnd-btn pnd-apply" onclick="toggleAll(true)">&#9745; Mark All</button>
-    <button type="button" class="pnd-btn pnd-apply" onclick="toggleAll(false)">&#9744; Unmark All</button>
+    <button type="button" class="pnd-btn pnd-mark" onclick="toggleAll(true)">&#9745; Mark All</button>
+    <button type="button" class="pnd-btn pnd-mark" onclick="toggleAll(false)">&#9744; Unmark All</button>
     <span class="pnd-count">${countLabel}</span>
     <div class="pnd-pagination">
       ${prevUrl?`<a class="pg-btn pg-nav" href="${escHtml(prevUrl)}">&lsaquo; Prev</a>`:`<span class="pg-btn pg-nav" style="opacity:.4;cursor:default">&lsaquo; Prev</span>`}
