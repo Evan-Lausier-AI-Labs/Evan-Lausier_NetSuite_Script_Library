@@ -17,14 +17,16 @@
  * Fix (2026-04-02g): \\n literal newline JS syntax error fixed.
  * Chore (2026-04-02h): Mark All / Unmark All buttons styled blue.
  * Fix (2026-04-02i): Removed explicit undepfunds=false.
- * Fix (2026-04-02j-l): Bank account and subsidiary sourcing — final state:
+ * Fix (2026-04-02j-m): Bank account and subsidiary sourcing — final state:
  *   - subsidiaryId  = invoice's own subsidiary (sub = tl.subsidiary); set AFTER
- *     customer to override NS default so apply sublist loads the invoice's subsidiary
- *   - bankAccountId = customer's subsidiary bank account (cs.custrecord4); this
- *     matches the GTF Bank Internal ID column shown in the Suitelet and is the
- *     account NS accepts — the invoice's subsidiary may not have custrecord4 set
- *   - Both DATA_SELECT (display) and fetchCreateData (creation) use cs for bank
- *     account columns; sub is retained for Subsidiary External ID display only
+ *     customer to override NS default so apply sublist loads invoice's subsidiary
+ *   - bankAccountId = GL account resolved by joining account.externalid =
+ *     cs.custrecord_gtf_bank_account_number (customer subsidiary bank account number).
+ *     Resolves the correct environment-specific internal ID from the external ID
+ *     shown in the "Bank Account External ID" column (e.g. "1001").
+ *     cs.custrecord4 is NOT the GL account internal ID.
+ *   - DATA_SELECT display uses cs for bank account columns; sub for Subsidiary
+ *     External ID display only.
  */
 
 define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
@@ -93,8 +95,8 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
         JOIN subsidiary sub ON sub.id = tl.subsidiary
     `;
 
-    // Bank account columns sourced from CUSTOMER's subsidiary (cs), matching what
-    // fetchCreateData uses. Invoice subsidiary (sub) used for display only.
+    // Bank account columns sourced from CUSTOMER's subsidiary (cs).
+    // Invoice subsidiary (sub) used for Subsidiary External ID display only.
     const DATA_SELECT = `
         SELECT
             t.id                                                                AS "Invoice Internal ID",
@@ -325,16 +327,19 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
             // subsidiaryId  = invoice's own subsidiary (sub = tl.subsidiary)
             //                 Set AFTER customer to override NS default so the apply
             //                 sublist loads under the invoice's subsidiary.
-            // bankAccountId = CUSTOMER's subsidiary bank account (cs.custrecord4)
-            //                 Matches GTF Bank Internal ID shown in the Suitelet row.
-            //                 The invoice's subsidiary may not have custrecord4 set.
-            const sql=`SELECT t.id,c.id,sub.id,cs.custrecord4,a.id,t.currency,
+            // bankAccountId = GL account resolved by joining account.externalid =
+            //                 cs.custrecord_gtf_bank_account_number (the Bank Account
+            //                 External ID shown in the row, e.g. "1001"). This is
+            //                 environment-independent — cs.custrecord4 is NOT the GL
+            //                 account internal ID.
+            const sql=`SELECT t.id,c.id,sub.id,bank_acct.id,a.id,t.currency,
                        sub.externalid||'-'||LPAD(TO_CHAR(t.id),10,'0'),t.memo,t.foreigntotal,TO_CHAR(t.trandate,'YYYY-MM-DD')
                 FROM transaction t
                 JOIN transactionline tl ON tl.transaction=t.id AND tl.mainline='T' AND tl.taxline='F'
                 JOIN customer c ON c.id=t.entity
                 JOIN subsidiary sub ON sub.id=tl.subsidiary
                 JOIN subsidiary cs ON cs.id=c.subsidiary
+                LEFT JOIN account bank_acct ON bank_acct.externalid=cs.custrecord_gtf_bank_account_number
                 JOIN account a ON a.id=tl.expenseaccount
                 WHERE t.id IN(${txnIds.slice(i,i+BATCH_SIZE).join(',')})`;
             (query.runSuiteQL({query:sql}).results||[]).forEach(row=>{
@@ -360,7 +365,7 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
         const rows=fetchCreateData(ids), results=[];
         rows.forEach(row=>{
             try {
-                if (!row.bankAccountId) throw new Error('Bank account could not be resolved — verify GTF Bank Internal ID on customer subsidiary');
+                if (!row.bankAccountId) throw new Error('Bank account could not be resolved — verify Bank Account External ID on customer subsidiary');
                 if (!row.arAccountId)   throw new Error('AR account could not be resolved');
                 const selectedEbdId=ebdByTxn[String(row.txnId)]||'';
                 log.debug({title:'createPayments',details:`Invoice ${row.txnId} — subsidiary: ${row.subsidiaryId}, account: ${row.bankAccountId}, EBD: ${selectedEbdId}`});
