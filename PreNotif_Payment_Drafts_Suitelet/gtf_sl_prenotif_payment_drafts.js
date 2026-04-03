@@ -8,25 +8,28 @@
  * Script ID:    customscript_gtf_sl_prenotif_drafts
  * Deploy ID:    customdeploy_store_level_payment_draft
  *
- * Fix (2026-03-31a): baseUrl fix. Fix (2026-03-31b/c): Invoice Memo / Payment Note.
- * Feat (2026-03-31d): Checkboxes + Create Payment Drafts. Fix (2026-04-01a-f): Various.
+ * Fix (2026-03-31a): baseUrl fix.
+ * Fix (2026-03-31b/c): Invoice Memo / Payment Note(Memo) sourcing.
+ * Feat (2026-03-31d): Per-row checkboxes + Create Payment Drafts button.
+ * Fix (2026-04-01a-f): Various filter, URL, and display fixes.
  * Feat (2026-04-02a): EFT columns from customrecord_2663_entity_bank_details.
- * Feat (2026-04-02b-c): EFT Type inline dropdown; ebd_ids POSTed with creation.
- * Chore (2026-04-02d-e): Filter bar cleanup.
+ * Feat (2026-04-02b-c): EFT Type inline per-row dropdown; ebd_ids POSTed with creation.
+ * Chore (2026-04-02d-e): Filter bar cleanup; Subsidiary filter.
  * Fix (2026-04-02f): Mark All selects all pages via allFilteredIds.
- * Fix (2026-04-02g): \\n literal newline JS syntax error fixed.
- * Chore (2026-04-02h): Mark All / Unmark All buttons styled blue.
+ * Fix (2026-04-02g): Fixed \\n literal newline JS syntax error.
+ * Chore (2026-04-02h): Mark All / Unmark All styled blue.
  * Fix (2026-04-02i): Removed explicit undepfunds=false.
- * Fix (2026-04-02j-m): Bank account and subsidiary sourcing — final state:
- *   - subsidiaryId  = invoice's own subsidiary (sub = tl.subsidiary); set AFTER
- *     customer to override NS default so apply sublist loads invoice's subsidiary
- *   - bankAccountId = GL account resolved by joining account.externalid =
- *     cs.custrecord_gtf_bank_account_number (customer subsidiary bank account number).
- *     Resolves the correct environment-specific internal ID from the external ID
- *     shown in the "Bank Account External ID" column (e.g. "1001").
- *     cs.custrecord4 is NOT the GL account internal ID.
- *   - DATA_SELECT display uses cs for bank account columns; sub for Subsidiary
- *     External ID display only.
+ * Fix (2026-04-02j-n): Payment creation — final approach:
+ *   - isDynamic:false matches CSV import behavior, bypassing UI-level
+ *     account/subsidiary dropdown filtering that rejects cross-subsidiary
+ *     bank accounts (e.g. Moe's LLC bank on a Moe's SPV payment).
+ *   - subsidiaryId = invoice subsidiary (sub = tl.subsidiary).
+ *   - bankAccountId = GL account resolved via LEFT JOIN account ON
+ *     account.externalid = cs.custrecord_gtf_bank_account_number.
+ *     Environment-independent. cs.custrecord4 is NOT the GL account ID.
+ *   - sublist: setSublistValue (no selectLine/commitLine in standard mode).
+ *   - DATA_SELECT uses cs for bank account display columns; sub for
+ *     Subsidiary External ID display.
  */
 
 define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
@@ -76,9 +79,8 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
 
     const COLUMN_DATA_INDICES = [0,1,2,3,4,18,5,6,7,8,9,10,11,12,13,14,15,16,17,19,20,21];
 
-    // BASE_FROM joins both the transaction's subsidiary (sub = tl.subsidiary, for
-    // Subsidiary External ID display) and the customer's subsidiary (cs = c.subsidiary,
-    // for bank account display columns and payment creation).
+    // BASE_FROM joins invoice subsidiary (sub) for display and customer subsidiary
+    // (cs) for bank account display columns that drive payment creation.
     const BASE_FROM = `
         FROM transaction t
         JOIN transactionline tl ON tl.transaction = t.id AND tl.mainline = 'T' AND tl.taxline = 'F'
@@ -95,8 +97,8 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
         JOIN subsidiary sub ON sub.id = tl.subsidiary
     `;
 
-    // Bank account columns sourced from CUSTOMER's subsidiary (cs).
-    // Invoice subsidiary (sub) used for Subsidiary External ID display only.
+    // Bank account display columns from CUSTOMER subsidiary (cs).
+    // Invoice subsidiary (sub) used for Subsidiary External ID only.
     const DATA_SELECT = `
         SELECT
             t.id                                                                AS "Invoice Internal ID",
@@ -324,14 +326,11 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
         if (!txnIds||!txnIds.length) return [];
         const results=[];
         for (let i=0;i<txnIds.length;i+=BATCH_SIZE){
-            // subsidiaryId  = invoice's own subsidiary (sub = tl.subsidiary)
-            //                 Set AFTER customer to override NS default so the apply
-            //                 sublist loads under the invoice's subsidiary.
-            // bankAccountId = GL account resolved by joining account.externalid =
-            //                 cs.custrecord_gtf_bank_account_number (the Bank Account
-            //                 External ID shown in the row, e.g. "1001"). This is
-            //                 environment-independent — cs.custrecord4 is NOT the GL
-            //                 account internal ID.
+            // subsidiaryId  = invoice subsidiary (sub = tl.subsidiary)
+            // bankAccountId = GL account resolved via account.externalid =
+            //                 cs.custrecord_gtf_bank_account_number (Bank Account
+            //                 External ID from the row, e.g. "1001").
+            //                 Environment-independent. cs.custrecord4 is NOT the GL account ID.
             const sql=`SELECT t.id,c.id,sub.id,bank_acct.id,a.id,t.currency,
                        sub.externalid||'-'||LPAD(TO_CHAR(t.id),10,'0'),t.memo,t.foreigntotal,TO_CHAR(t.trandate,'YYYY-MM-DD')
                 FROM transaction t
@@ -368,11 +367,10 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
                 if (!row.bankAccountId) throw new Error('Bank account could not be resolved — verify Bank Account External ID on customer subsidiary');
                 if (!row.arAccountId)   throw new Error('AR account could not be resolved');
                 const selectedEbdId=ebdByTxn[String(row.txnId)]||'';
-                log.debug({title:'createPayments',details:`Invoice ${row.txnId} — subsidiary: ${row.subsidiaryId}, account: ${row.bankAccountId}, EBD: ${selectedEbdId}`});
-                const rec=record.create({type:record.Type.CUSTOMER_PAYMENT,isDynamic:true});
-                // Set customer first (NS defaults subsidiary to customer's home subsidiary),
-                // then override subsidiary to the invoice's own subsidiary so the apply
-                // sublist loads under that subsidiary and finds the target invoice.
+                log.debug({title:'createPayments',details:`Invoice ${row.txnId} — sub: ${row.subsidiaryId}, acct: ${row.bankAccountId}, EBD: ${selectedEbdId}`});
+                const rec=record.create({type:record.Type.CUSTOMER_PAYMENT,isDynamic:false});
+                // isDynamic:false matches CSV import behavior — bypasses UI account/subsidiary
+                // dropdown filtering that rejects cross-subsidiary bank accounts.
                 rec.setValue({fieldId:'customer',value:parseInt(row.customerId)});
                 rec.setValue({fieldId:'subsidiary',value:parseInt(row.subsidiaryId)});
                 rec.setValue({fieldId:'account',value:parseInt(row.bankAccountId)});
@@ -388,10 +386,9 @@ define(['N/query', 'N/log', 'N/ui/serverWidget', 'N/record', 'N/search'],
                 let applied=false;
                 for (let i=0;i<lineCount;i++){
                     if (Number(rec.getSublistValue({sublistId:'apply',fieldId:'doc',line:i}))===Number(row.txnId)){
-                        rec.selectLine({sublistId:'apply',line:i});
-                        rec.setCurrentSublistValue({sublistId:'apply',fieldId:'apply',value:true});
-                        rec.setCurrentSublistValue({sublistId:'apply',fieldId:'amount',value:parseFloat(row.paymentAmount)});
-                        rec.commitLine({sublistId:'apply'}); applied=true; break;
+                        rec.setSublistValue({sublistId:'apply',fieldId:'apply',line:i,value:true});
+                        rec.setSublistValue({sublistId:'apply',fieldId:'amount',line:i,value:parseFloat(row.paymentAmount)});
+                        applied=true; break;
                     }
                 }
                 if (!applied) throw new Error(`Invoice ${row.txnId} not found in apply sublist.`);
