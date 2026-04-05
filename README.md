@@ -26,6 +26,7 @@ Each script is organized in its own folder. Folders named `gtf_*` are GTF-specif
 | [Invoice_Line_Deletion](./Invoice_Line_Deletion) | Map/Reduce | 2.1 | Bulk removal of duplicate or unwanted lines from invoices with dry run support |
 | [JE_CSV_Validation](./JE_CSV_Validation) | User Event | 1.0 | Validate Journal Entry lines during CSV import |
 | [JE_Line_Validation](./JE_Line_Validation) | Client | 1.0 | Real-time JE line validation based on account classification |
+| [JE_UserEvent](./JE_UserEvent) | User Event | 2.1 | GTF Journal Entry User Event (`gtf_ue_journals.js`) — auto-populates Brand and COA segment fields on JE lines; enforces department, fund, and entity required flags per account configuration |
 | [NACHA_Regions_Templates](./NACHA_Regions_Templates) | FreeMarker | 1.x | Payment Manager FreeMarker templates for Regions Bank ACH (templates 170/171) |
 | [NACHA_WellsFargo_Templates](./NACHA_WellsFargo_Templates) | FreeMarker | 1.x | Payment Manager FreeMarker templates for Wells Fargo ACH DD and EFT (templates 167/168) |
 | [OneStream](./OneStream) | RESTlet | 2.1 | GTF OneStream integration RESTlet (`gtf_rl_onestream_v2.js`) — serves GL, balance sheet, and synthetic RE roll-forward data to OneStream for financial consolidation |
