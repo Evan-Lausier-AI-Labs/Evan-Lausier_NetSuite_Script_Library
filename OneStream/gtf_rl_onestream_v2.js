@@ -36,6 +36,14 @@
 * validation. Reverting to the stable ed803d8 state (350005 roll-forward only,
 * all IS activity regardless of fund dimension) pending further investigation
 * into the correct 3005 treatment.
+*
+* Fix (2026-04-08): Expanded transaction type filter in both buildSuiteQL and
+* buildRetainedEarningsRollForwardSQL from ('CustInvc', 'Journal') to the full
+* set of posting transaction types: CustCred, VendBill, VendCred, CustPymt,
+* VendPymt, CustRfnd, and AdvInterCompanyJournalEntry. The prior narrow filter
+* was excluding credit memos, vendor bills/credits, payments, and ICJEs from
+* the trial balance entirely. Both queries updated identically to keep the RE
+* roll-forward in sync with the main query.
 */
 
 define(['N/query', 'N/file', 'N/runtime', 'N/log'], (query, file, runtime, log) => {
@@ -245,7 +253,7 @@ define(['N/query', 'N/file', 'N/runtime', 'N/log'], (query, file, runtime, log) 
       JOIN accountingperiod ap
         ON ap.id = t.postingperiod
       WHERE 
-        t.type IN ('CustInvc', 'Journal') 
+        t.type IN ('CustInvc', 'Journal', 'CustCred', 'VendBill', 'VendCred', 'CustPymt', 'VendPymt', 'CustRfnd', 'AdvInterCompanyJournalEntry')
         AND t.posting = 'T'
         AND tal.account IS NOT NULL
         AND ap.isinactive = 'F'
@@ -329,7 +337,7 @@ define(['N/query', 'N/file', 'N/runtime', 'N/log'], (query, file, runtime, log) 
         ON ap.id = t.postingperiod
       LEFT JOIN subsidiary sub
         ON sub.id = tl.subsidiary
-      WHERE t.type IN ('CustInvc', 'Journal')
+      WHERE t.type IN ('CustInvc', 'Journal', 'CustCred', 'VendBill', 'VendCred', 'CustPymt', 'VendPymt', 'CustRfnd', 'AdvInterCompanyJournalEntry')
         AND t.posting = 'T'
         AND tal.accountingbook = 1
         AND acc.accttype IN ('Income', 'Expense', 'OthExpense', 'COGS', 'OthIncome')
@@ -380,7 +388,7 @@ define(['N/query', 'N/file', 'N/runtime', 'N/log'], (query, file, runtime, log) 
       'Program Description'                           : 'None',
       'Licensing Manufacturers'                       : null,
       'Licensing Manufacturer Description'            : null,
-      'Licensing Retailers'                           : null,
+      'Licensing Retailers'                            : null,
       'Licensing Retailer Description'                : null,
       'Manufacturing and Warehousing COGS'            : 'None',
       'Manufacturing and Warehouse COGS Description'  : 'None',
